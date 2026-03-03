@@ -188,7 +188,7 @@ void fetchWeather() {
         weather.description[0] -= 32;
       }
 
-      Serial.printf("[Weather] %.1f°, %s\n", weather.temp, weather.description);
+      Serial.printf("[Weather] %.1f\xF8, %s\n", weather.temp, weather.description);
     } else {
       Serial.printf("[Weather] JSON parse error: %s\n", err.c_str());
     }
@@ -256,8 +256,11 @@ void drawMainPanel() {
   drawPanel(8, 8, 154, SCREEN_H - 16, PANEL_COLOR);
 
   if (hasTime) {
+    int hour12 = t.tm_hour % 12;
+    if (hour12 == 0) hour12 = 12;
+
     char timeBuf[6];
-    snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d", t.tm_hour, t.tm_min);
+    snprintf(timeBuf, sizeof(timeBuf), "%2d:%02d", hour12, t.tm_min);
 
     gfx->setTextColor(TEXT_PRIMARY);
     gfx->setTextSize(4);
@@ -329,7 +332,7 @@ void drawMainPanel() {
     // Temperature — big
     char tempBuf[10];
     const char* unit = (strcmp(OWM_UNITS, "imperial") == 0) ? "F" : "C";
-    snprintf(tempBuf, sizeof(tempBuf), "%.0f°%s", weather.temp, unit);
+    snprintf(tempBuf, sizeof(tempBuf), "%.0f\xF8%s", weather.temp, unit);
     gfx->setTextColor(TEXT_PRIMARY);
     gfx->setTextSize(3);
     gfx->setCursor(362, 30);
@@ -343,7 +346,7 @@ void drawMainPanel() {
 
     // Feels like + humidity
     char detailBuf[28];
-    snprintf(detailBuf, sizeof(detailBuf), "Feels %.0f° | %d%%", weather.feels_like, weather.humidity);
+    snprintf(detailBuf, sizeof(detailBuf), "Feels %.0f\xF8 | %d%%", weather.feels_like, weather.humidity);
     gfx->setTextColor(TEXT_SECONDARY);
     gfx->setCursor(362, 92);
     gfx->print(detailBuf);
