@@ -327,43 +327,38 @@ void drawMainPanel() {
   struct tm t;
   bool hasTime = getLocalTime(&t, 0);
 
-  // ── TIME SECTION (x: 0–170) ─────────────────────────────
-  drawPanel(8, 8, 154, SCREEN_H - 16, PANEL_COLOR);
+  // ── TIME SECTION (x: 0–178) ─────────────────────────────
+  // Two rows centered: HH:MM:SS then AM/PM
+  drawPanel(8, 8, 170, SCREEN_H - 16, PANEL_COLOR);
 
   if (hasTime) {
     int hour12 = t.tm_hour % 12;
     if (hour12 == 0) hour12 = 12;
 
-    char timeBuf[6];
-    snprintf(timeBuf, sizeof(timeBuf), "%2d:%02d", hour12, t.tm_min);
-
+    // HH:MM:SS — centered
+    char timeBuf[10];
+    snprintf(timeBuf, sizeof(timeBuf), "%d:%02d:%02d", hour12, t.tm_min, t.tm_sec);
+    int timeW = strlen(timeBuf) * 18; // textSize 3: 6*3=18px per char
     gfx->setTextColor(TEXT_PRIMARY);
-    gfx->setTextSize(4);
-    gfx->setCursor(20, 40);
+    gfx->setTextSize(3);
+    gfx->setCursor(8 + (170 - timeW) / 2, 48);
     gfx->print(timeBuf);
 
-    // Seconds — smaller, accent color
-    char secBuf[4];
-    snprintf(secBuf, sizeof(secBuf), ":%02d", t.tm_sec);
+    // AM/PM — centered below
+    const char* ampm = t.tm_hour >= 12 ? "PM" : "AM";
+    gfx->setTextColor(TEXT_SECONDARY);
     gfx->setTextSize(2);
-    gfx->setTextColor(ACCENT_COLOR);
-    gfx->setCursor(52, 95);
-    gfx->print(secBuf);
-
-    // AM/PM indicator
-    gfx->setTextSize(1);
-    gfx->setTextColor(TEXT_DIM);
-    gfx->setCursor(100, 95);
-    gfx->print(t.tm_hour >= 12 ? "PM" : "AM");
+    gfx->setCursor(8 + (170 - 24) / 2, 82); // 2 chars * 12px = 24px
+    gfx->print(ampm);
   } else {
     gfx->setTextColor(TEXT_DIM);
-    gfx->setTextSize(2);
-    gfx->setCursor(30, 60);
+    gfx->setTextSize(3);
+    gfx->setCursor(8 + (170 - 90) / 2, 60); // "--:--" = 5 chars * 18px
     gfx->print("--:--");
   }
 
-  // ── DATE SECTION (x: 170–350) ───────────────────────────
-  drawPanel(170, 8, 172, SCREEN_H - 16, PANEL_COLOR);
+  // ── DATE SECTION (x: 186–362) ──────────────────────────
+  drawPanel(186, 8, 176, SCREEN_H - 16, PANEL_COLOR);
 
   if (hasTime) {
     // Day of week
@@ -371,121 +366,119 @@ void drawMainPanel() {
                           "Thursday", "Friday", "Saturday"};
     gfx->setTextColor(ACCENT_COLOR);
     gfx->setTextSize(2);
-    gfx->setCursor(182, 30);
+    gfx->setCursor(198, 24);
     gfx->print(days[t.tm_wday]);
 
-    // Date
+    // Month Day
     const char* months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
                             "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
     char dateBuf[16];
     snprintf(dateBuf, sizeof(dateBuf), "%s %d", months[t.tm_mon], t.tm_mday);
     gfx->setTextColor(TEXT_PRIMARY);
     gfx->setTextSize(2);
-    gfx->setCursor(182, 65);
+    gfx->setCursor(198, 52);
     gfx->print(dateBuf);
 
-    // Year
+    // Year — same size as date, slightly off-white
     char yearBuf[6];
     snprintf(yearBuf, sizeof(yearBuf), "%d", t.tm_year + 1900);
-    gfx->setTextColor(TEXT_DIM);
-    gfx->setTextSize(1);
-    gfx->setCursor(182, 100);
+    gfx->setTextColor(TEXT_SECONDARY);
+    gfx->setTextSize(2);
+    gfx->setCursor(198, 80);
     gfx->print(yearBuf);
 
-    // Week number
+    // Week number — same size as date, slightly off-white
     int weekNum = (t.tm_yday + 7 - ((t.tm_wday + 6) % 7)) / 7;
     char weekBuf[12];
     snprintf(weekBuf, sizeof(weekBuf), "Week %d", weekNum);
-    gfx->setCursor(182, 120);
+    gfx->setTextColor(TEXT_SECONDARY);
+    gfx->setTextSize(2);
+    gfx->setCursor(198, 108);
     gfx->print(weekBuf);
   }
 
-  // ── WEATHER SECTION (x: 350–510) ────────────────────────
-  drawPanel(350, 8, 152, SCREEN_H - 16, PANEL_COLOR);
+  // ── WEATHER SECTION (x: 370–526) ──────────────────────
+  drawPanel(370, 8, 156, SCREEN_H - 16, PANEL_COLOR);
 
   if (weather.valid) {
-    // Temperature — big
+    // Temperature — large
     char tempBuf[10];
     const char* unit = (strcmp(OWM_UNITS, "imperial") == 0) ? "F" : "C";
     snprintf(tempBuf, sizeof(tempBuf), "%.0f\xF8%s", weather.temp, unit);
     gfx->setTextColor(TEXT_PRIMARY);
-    gfx->setTextSize(3);
-    gfx->setCursor(362, 30);
+    gfx->setTextSize(4);
+    gfx->setCursor(382, 22);
     gfx->print(tempBuf);
 
     // Description
     gfx->setTextColor(ACCENT_COLOR);
-    gfx->setTextSize(1);
-    gfx->setCursor(362, 72);
+    gfx->setTextSize(2);
+    gfx->setCursor(382, 68);
     gfx->print(weather.description);
 
     // Feels like + humidity
     char detailBuf[28];
     snprintf(detailBuf, sizeof(detailBuf), "Feels %.0f\xF8 | %d%%", weather.feels_like, weather.humidity);
     gfx->setTextColor(TEXT_SECONDARY);
-    gfx->setCursor(362, 92);
+    gfx->setTextSize(1);
+    gfx->setCursor(382, 100);
     gfx->print(detailBuf);
-
-    // City name
-    gfx->setTextColor(TEXT_DIM);
-    gfx->setCursor(362, 112);
-    gfx->print(OWM_CITY);
   } else {
     gfx->setTextColor(TEXT_DIM);
-    gfx->setTextSize(1);
-    gfx->setCursor(375, 60);
+    gfx->setTextSize(2);
+    gfx->setCursor(390, 50);
     gfx->print("Weather");
-    gfx->setCursor(375, 78);
+    gfx->setCursor(390, 78);
     gfx->print("loading...");
   }
 
-  // ── STATUS SECTION (x: 510–632) ─────────────────────────
-  drawPanel(510, 8, 122, SCREEN_H - 16, PANEL_COLOR);
+  // ── STATUS SECTION (x: 534–632) ───────────────────────
+  drawPanel(534, 8, 98, SCREEN_H - 16, PANEL_COLOR);
 
   // WiFi status
-  gfx->setTextSize(1);
-  gfx->setCursor(522, 25);
+  gfx->setTextSize(2);
+  gfx->setCursor(544, 16);
   if (wifiConnected) {
     gfx->setTextColor(GOOD_COLOR);
-    gfx->print("WiFi OK");
+    gfx->print("WiFi");
+    gfx->setTextSize(1);
     gfx->setTextColor(TEXT_DIM);
-    gfx->setCursor(522, 42);
-    // Show signal strength
+    gfx->setCursor(544, 38);
     int rssi = WiFi.RSSI();
-    char rssiBuf[16];
-    snprintf(rssiBuf, sizeof(rssiBuf), "%d dBm", rssi);
+    char rssiBuf[12];
+    snprintf(rssiBuf, sizeof(rssiBuf), "%ddBm", rssi);
     gfx->print(rssiBuf);
   } else {
     gfx->setTextColor(ERR_COLOR);
-    gfx->print("WiFi OFF");
+    gfx->print("No WiFi");
   }
 
   // Battery (placeholder until ADC is confirmed safe with QSPI)
-  gfx->setCursor(522, 60);
+  gfx->setTextSize(2);
   gfx->setTextColor(TEXT_DIM);
-  gfx->print("Bat: --");
+  gfx->setCursor(544, 58);
+  gfx->print("Bat --");
 
   // Uptime
   unsigned long uptimeSec = millis() / 1000;
   unsigned long hrs = uptimeSec / 3600;
   unsigned long mins = (uptimeSec % 3600) / 60;
-  char uptBuf[16];
-  snprintf(uptBuf, sizeof(uptBuf), "Up: %luh %lum", hrs, mins);
+  char uptBuf[12];
+  if (hrs >= 24) {
+    snprintf(uptBuf, sizeof(uptBuf), "%lud%luh", hrs / 24, hrs % 24);
+  } else {
+    snprintf(uptBuf, sizeof(uptBuf), "%luh%lum", hrs, mins);
+  }
+  gfx->setTextSize(2);
   gfx->setTextColor(TEXT_DIM);
-  gfx->setCursor(522, 112);
+  gfx->setCursor(544, 100);
   gfx->print(uptBuf);
 
   // Free heap
-  char heapBuf[16];
-  snprintf(heapBuf, sizeof(heapBuf), "%dK free", ESP.getFreeHeap() / 1024);
-  gfx->setCursor(522, 130);
+  char heapBuf[8];
+  snprintf(heapBuf, sizeof(heapBuf), "%dK", ESP.getFreeHeap() / 1024);
+  gfx->setCursor(544, 130);
   gfx->print(heapBuf);
-
-  // ── BOTTOM BAR — touch hint ──────────────────────────────
-  gfx->setTextColor(TEXT_DIM);
-  gfx->setTextSize(1);
-  gfx->setCursor(250, SCREEN_H - 14);
-  gfx->print("[ tap to refresh ]");
 
   gfx->flush();
 }
