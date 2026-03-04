@@ -19,7 +19,7 @@ A WiFi-connected always-on desk HUD built for the Waveshare ESP32-S3-Touch-LCD-3
   TIME (160px)   DATE (172px)     WEATHER (152px)  STATUS (122px)
 ```
 
-Shows time, date, weather (via OpenWeatherMap), WiFi signal, battery level, and uptime — all at a glance on your desk.
+Shows time, date, weather (via OpenWeatherMap), WiFi signal, battery level, and uptime — all at a glance on your desk. A tiny animated critter pet roams the bottom of the screen, reacting to device tilt via the onboard accelerometer.
 
 ## Hardware
 
@@ -45,6 +45,7 @@ Open **Sketch → Include Library → Manage Libraries** and install:
 |---------|--------|-------|
 | GFX Library for Arduino | moononournation | Display driver (has AXS15231B support) |
 | ArduinoJson | Benoit Blanchon | Weather API JSON parsing |
+| SensorLib | Lewis He | IMU driver for QMI8658 accelerometer (critter pet) |
 
 ### 3. Configure
 
@@ -139,7 +140,8 @@ After you get this running, here are natural next features to add:
 - **LVGL upgrade** — swap Arduino_GFX primitives for LVGL widgets for smoother UI and animations
 - **OTA updates** — add ArduinoOTA so you can push updates over WiFi
 - **Deep sleep** — use the RTC to wake periodically and save battery
-- **IMU gestures** — use the onboard QMI8658 to detect tilt/tap gestures
+- **Critter enhancements** — weather reactions, touch interaction, mood system, a second critter friend
+- **IMU gestures** — use the onboard QMI8658 to detect tilt/tap gestures beyond critter control
 
 ## License
 
