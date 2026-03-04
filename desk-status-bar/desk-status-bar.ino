@@ -276,13 +276,29 @@ void fetchWeather() {
 
 // =============================================================
 // Battery Voltage
-// ADC1 reads (both Arduino analogRead and ESP-IDF oneshot)
-// interfere with the QSPI display on this board. GPIO 4
-// (ADC1_CH3) shares ADC1 hardware with GPIO 9/10 (QSPI CS/CLK).
-// Battery % is not readable without an external I2C ADC.
+// Read ADC ONCE at boot before display init, then never again.
+// ADC1 conflicts with QSPI display pins, so we sample early
+// and cache the result. Updated only on reboot.
 // =============================================================
+float cachedBatteryVoltage = 0.0f;
+
+void sampleBatteryOnce() {
+  // Enable voltage divider
+  tca9554SetPin(TCA9554_ADC_EN, false);
+  delay(10); // let divider settle
+
+  // Read raw ADC — using analogReadMilliVolts on GPIO 4 only
+  int mv = analogReadMilliVolts(BAT_ADC_PIN);
+  cachedBatteryVoltage = (mv * BAT_DIVIDER) / 1000.0f;
+
+  // Disable divider to reduce power drain
+  tca9554SetPin(TCA9554_ADC_EN, true);
+
+  Serial.printf("[Battery] One-shot read: %dmV raw, %.2fV battery\n", mv, cachedBatteryVoltage);
+}
+
 float getBatteryVoltage() {
-  return 0.0f;
+  return cachedBatteryVoltage;
 }
 
 int getBatteryPercent(float voltage) {
@@ -455,11 +471,22 @@ void drawMainPanel() {
     gfx->print("No WiFi");
   }
 
-  // Battery — ADC1 conflicts with QSPI, not readable on this board
+  // Battery (sampled once at boot)
+  float batV = getBatteryVoltage();
   gfx->setTextSize(2);
-  gfx->setTextColor(TEXT_DIM);
   gfx->setCursor(544, 58);
-  gfx->print("Bat --");
+  if (batV > 0.5f) {
+    int batPct = getBatteryPercent(batV);
+    if (batPct > 50)      gfx->setTextColor(GOOD_COLOR);
+    else if (batPct > 20) gfx->setTextColor(WARN_COLOR);
+    else                   gfx->setTextColor(ERR_COLOR);
+    char batBuf[8];
+    snprintf(batBuf, sizeof(batBuf), "%d%%", batPct);
+    gfx->print(batBuf);
+  } else {
+    gfx->setTextColor(TEXT_DIM);
+    gfx->print("Bat --");
+  }
 
   // Uptime
   unsigned long uptimeSec = millis() / 1000;
@@ -558,6 +585,7 @@ void setup() {
   Wire1.begin(I2C_SDA, I2C_SCL);      // Bus 1: peripherals (has TCA9554)
   delay(20);                           // Let TCA9554 stabilize after power-on
   latchPowerOn();
+  sampleBatteryOnce(); // Read ADC BEFORE display init — only chance
 
   Serial.begin(115200);
   delay(300);
