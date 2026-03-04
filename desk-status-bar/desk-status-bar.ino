@@ -428,18 +428,34 @@ void drawMainPanel() {
     gfx->setCursor(382, 22);
     gfx->print(tempBuf);
 
-    // Description
+    // Description — word wrap if > 12 chars (panel is ~144px at textSize 2)
     gfx->setTextColor(ACCENT_COLOR);
     gfx->setTextSize(2);
-    gfx->setCursor(382, 68);
-    gfx->print(weather.description);
+    int descLen = strlen(weather.description);
+    int maxChars = 12;
+    if (descLen <= maxChars) {
+      gfx->setCursor(382, 68);
+      gfx->print(weather.description);
+    } else {
+      // Find last space within maxChars
+      int split = maxChars;
+      for (int i = maxChars - 1; i > 0; i--) {
+        if (weather.description[i] == ' ') { split = i; break; }
+      }
+      char line1[32];
+      strlcpy(line1, weather.description, split + 1);
+      gfx->setCursor(382, 62);
+      gfx->print(line1);
+      gfx->setCursor(382, 82);
+      gfx->print(&weather.description[split + (weather.description[split] == ' ' ? 1 : 0)]);
+    }
 
     // Feels like + humidity
     char detailBuf[28];
     snprintf(detailBuf, sizeof(detailBuf), "Feels %.0f\xF8 | %d%%", weather.feels_like, weather.humidity);
     gfx->setTextColor(TEXT_SECONDARY);
     gfx->setTextSize(1);
-    gfx->setCursor(382, 100);
+    gfx->setCursor(382, 106);
     gfx->print(detailBuf);
   } else {
     gfx->setTextColor(TEXT_DIM);
