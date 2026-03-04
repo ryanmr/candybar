@@ -11,6 +11,7 @@
 // Libraries needed (install via Arduino Library Manager):
 //   - GFX Library for Arduino (Arduino_GFX)  by moononournation
 //   - ArduinoJson                            by Benoit Blanchon
+//   - SensorLib                              by Lewis He
 //
 // Board settings in Arduino IDE:
 //   Board:          ESP32S3 Dev Module
@@ -26,6 +27,7 @@
 #include <ArduinoJson.h>
 #include <time.h>
 #include <Wire.h>
+#include <SensorQMI8658.hpp>
 
 // Use SPI3_HOST for QSPI display (matches Waveshare reference design)
 #define ESP32QSPI_SPI_HOST SPI3_HOST
@@ -78,6 +80,10 @@ Arduino_Canvas *gfx = new Arduino_Canvas(LCD_WIDTH, LCD_HEIGHT, display);
 #define WARN_COLOR     gfx->color565(255, 180, 60)    // amber
 #define ERR_COLOR      gfx->color565(255, 80, 80)     // red
 #define DIVIDER_COLOR  gfx->color565(50, 50, 65)      // subtle line
+#define CRITTER_BODY      gfx->color565(120, 200, 160)  // soft mint green
+#define CRITTER_HIGHLIGHT gfx->color565(160, 230, 190)  // lighter mint
+#define CRITTER_EYE       gfx->color565(240, 240, 250)  // near-white
+#define CRITTER_CHEEK     gfx->color565(255, 160, 160)  // pink blush
 
 // =============================================================
 // State
@@ -103,6 +109,24 @@ bool onBattery     = false;    // true if booted from power button (battery)
 unsigned long pwrBtnDownAt = 0;  // millis when power button was first pressed
 bool pwrBtnWasDown = false;
 bool pwrBtnReady   = false;     // true once we've seen a LOW reading (button released)
+
+// -- IMU (QMI8658 accelerometer for critter tilt) --
+SensorQMI8658 qmi;
+bool qmiReady = false;
+
+// -- Critter pet state --
+enum CritterState { CRIT_IDLE, CRIT_WALKING, CRIT_JUMPING, CRIT_WAVING, CRIT_SLEEPING };
+CritterState critterState = CRIT_IDLE;
+float critterX = 320.0f;
+float critterY = 0.0f;       // jump offset (positive = up)
+float critterVX = 0.0f;
+float critterVY = 0.0f;
+int critterDir = 1;           // 1=right, -1=left
+int critterAnimTick = 0;
+int critterIdleTicks = 0;
+int critterStateTicks = 0;
+unsigned long critterBlinkTime = 0;
+bool critterBlink = false;
 
 struct TouchPoint {
   int16_t x;
@@ -337,6 +361,187 @@ const char* weatherLabel(const char* icon) {
 }
 
 // =============================================================
+// Critter Pet — animated blob that roams the bottom of the screen
+// =============================================================
+void updateCritter() {
+  critterAnimTick++;
+
+  // Read accelerometer tilt
+  float tiltX = 0.0f;
+  if (qmiReady) {
+    IMUdata acc;
+    IMUdata gyro;
+    if (qmi.getDataReady()) {
+      if (qmi.getAccelerometer(acc.x, acc.y, acc.z)) {
+        tiltX = acc.x;
+      }
+      qmi.getGyroscope(gyro.x, gyro.y, gyro.z); // must read both
+    }
+  }
+
+  // Log accel every 10 ticks for debugging
+  if (qmiReady && critterAnimTick % 10 == 0) {
+    Serial.printf("[Critter] accel x=%.2f state=%d pos=%.0f\n", tiltX, critterState, critterX);
+  }
+
+  // Dead zone ±0.5, map to ±20 px/tick max
+  float tiltForce = 0.0f;
+  if (tiltX > 0.5f) tiltForce = min((tiltX - 0.5f) * 6.0f, 20.0f);
+  else if (tiltX < -0.5f) tiltForce = max((tiltX + 0.5f) * 6.0f, -20.0f);
+  bool tilting = (fabsf(tiltForce) > 0.1f);
+
+  // Blink timer
+  if (millis() - critterBlinkTime > 3000 + random(2000)) {
+    critterBlink = true;
+    critterBlinkTime = millis();
+  }
+  if (critterBlink && millis() - critterBlinkTime > 150) {
+    critterBlink = false;
+  }
+
+  // State machine
+  critterStateTicks++;
+
+  switch (critterState) {
+    case CRIT_IDLE:
+      critterVX *= 0.8f;
+      critterIdleTicks++;
+      if (tilting || random(100) < 10) {
+        critterState = CRIT_WALKING;
+        critterStateTicks = 0;
+        critterIdleTicks = 0;
+      } else if (random(100) < 5) {
+        critterState = CRIT_JUMPING;
+        critterStateTicks = 0;
+        critterVY = 6.0f;
+        critterIdleTicks = 0;
+      } else if (random(100) < 3) {
+        critterState = CRIT_WAVING;
+        critterStateTicks = 0;
+        critterIdleTicks = 0;
+      } else if (critterIdleTicks > 30) {
+        critterState = CRIT_SLEEPING;
+        critterStateTicks = 0;
+      }
+      break;
+
+    case CRIT_WALKING:
+      if (tilting) {
+        critterVX = tiltForce;
+        critterDir = (tiltForce > 0) ? 1 : -1;
+      } else {
+        critterVX += critterDir * 3.0f;
+        critterVX = constrain(critterVX, -12.0f, 12.0f);
+        if (critterStateTicks > 5 + (int)random(10)) {
+          critterState = CRIT_IDLE;
+          critterStateTicks = 0;
+        }
+      }
+      if (random(100) < 8) {
+        critterState = CRIT_JUMPING;
+        critterStateTicks = 0;
+        critterVY = 6.0f;
+      }
+      break;
+
+    case CRIT_JUMPING:
+      critterY += critterVY;
+      critterVY -= 2.0f;
+      if (critterY <= 0) {
+        critterY = 0;
+        critterVY = 0;
+        critterState = tilting ? CRIT_WALKING : CRIT_IDLE;
+        critterStateTicks = 0;
+      }
+      break;
+
+    case CRIT_WAVING:
+      if (critterStateTicks > 5) {
+        critterState = CRIT_IDLE;
+        critterStateTicks = 0;
+      }
+      break;
+
+    case CRIT_SLEEPING:
+      critterVX = 0;
+      if (tilting || random(100) < 2) {
+        critterState = CRIT_IDLE;
+        critterStateTicks = 0;
+        critterIdleTicks = 0;
+      }
+      break;
+  }
+
+  // Apply velocity and clamp
+  critterX += critterVX;
+  critterX = constrain(critterX, 6.0f, 634.0f);
+}
+
+void drawCritter() {
+  int cx = (int)critterX;
+  int cy = SCREEN_H - 10 - (int)critterY;
+  bool sleeping = (critterState == CRIT_SLEEPING);
+  int eyeShift = critterDir;
+
+  // Body
+  gfx->fillCircle(cx, cy, 6, CRITTER_BODY);
+  gfx->fillCircle(cx - 1, cy - 2, 3, CRITTER_HIGHLIGHT);
+
+  // Eyes
+  if (sleeping || critterBlink) {
+    gfx->drawFastHLine(cx - 4 + eyeShift, cy - 2, 2, CRITTER_EYE);
+    gfx->drawFastHLine(cx + 2 + eyeShift, cy - 2, 2, CRITTER_EYE);
+  } else {
+    gfx->fillCircle(cx - 3 + eyeShift, cy - 2, 1, CRITTER_EYE);
+    gfx->fillCircle(cx + 3 + eyeShift, cy - 2, 1, CRITTER_EYE);
+  }
+
+  // Cheeks
+  gfx->drawPixel(cx - 5, cy, CRITTER_CHEEK);
+  gfx->drawPixel(cx + 5, cy, CRITTER_CHEEK);
+
+  // Mouth
+  if (critterState == CRIT_JUMPING) {
+    gfx->drawPixel(cx, cy + 3, CRITTER_EYE);  // surprised "o"
+  } else if (sleeping) {
+    gfx->drawFastHLine(cx - 1, cy + 2, 3, CRITTER_EYE);  // flat
+  } else {
+    gfx->drawPixel(cx - 1, cy + 2, CRITTER_EYE);  // smile arc
+    gfx->drawPixel(cx, cy + 3, CRITTER_EYE);
+    gfx->drawPixel(cx + 1, cy + 2, CRITTER_EYE);
+  }
+
+  // Feet
+  if (critterState == CRIT_JUMPING) {
+    gfx->fillRect(cx - 3, cy + 5, 2, 2, CRITTER_BODY);
+    gfx->fillRect(cx + 1, cy + 5, 2, 2, CRITTER_BODY);
+  } else {
+    int footOff = (critterState == CRIT_WALKING && critterAnimTick % 2 == 0) ? 1 : 0;
+    gfx->fillRect(cx - 4, cy + 6 - footOff, 2, 2, CRITTER_BODY);
+    gfx->fillRect(cx + 2, cy + 6 + footOff, 2, 2, CRITTER_BODY);
+  }
+
+  // Waving arm
+  if (critterState == CRIT_WAVING) {
+    int armWiggle = (critterAnimTick % 2 == 0) ? -1 : 1;
+    gfx->fillRect(cx + critterDir * 7, cy - 4 + armWiggle, 2, 4, CRITTER_BODY);
+  }
+
+  // Sleeping ZZZ
+  if (sleeping) {
+    int zy = cy - 10 - (critterAnimTick % 3) * 3;
+    gfx->setTextColor(TEXT_SECONDARY);
+    gfx->setTextSize(1);
+    gfx->setCursor(cx + 6, zy);
+    gfx->print("z");
+    if (critterAnimTick % 6 < 3) {
+      gfx->setCursor(cx + 12, zy - 6);
+      gfx->print("z");
+    }
+  }
+}
+
+// =============================================================
 // Main Panel (0) — Time | Date | Weather | Battery
 // =============================================================
 void drawMainPanel() {
@@ -525,6 +730,12 @@ void drawMainPanel() {
   gfx->setCursor(544, 130);
   gfx->print(heapBuf);
 
+#if CRITTER_ENABLED
+  // Critter pet — draw after panels so it overlaps bottom edges
+  updateCritter();
+  drawCritter();
+#endif
+
   gfx->flush();
 }
 
@@ -603,11 +814,30 @@ void setup() {
   latchPowerOn();
   sampleBatteryOnce(); // Read ADC BEFORE display init — only chance
 
+#if CRITTER_ENABLED
+  // Init IMU (QMI8658 accelerometer for critter tilt detection)
+  qmiReady = qmi.begin(Wire1, QMI8658_ADDR, I2C_SDA, I2C_SCL);
+  if (qmiReady) {
+    qmi.configAccelerometer(SensorQMI8658::ACC_RANGE_4G, SensorQMI8658::ACC_ODR_62_5Hz);
+    qmi.configGyroscope(SensorQMI8658::GYR_RANGE_256DPS, SensorQMI8658::GYR_ODR_56_05Hz);
+    qmi.enableAccelerometer();
+    qmi.enableGyroscope();
+  }
+#endif
+
   Serial.begin(115200);
   delay(300);
   Serial.println("\n=============================");
   Serial.println("  Desk Status Bar — Booting");
   Serial.println("=============================\n");
+
+#if CRITTER_ENABLED
+  if (qmiReady) {
+    Serial.println("[IMU] QMI8658 initialized");
+  } else {
+    Serial.println("[IMU] QMI8658 not found — critter will use random movement");
+  }
+#endif
 
   // Power button read pin (GPIO 16) — HIGH when pressed
   // INPUT_PULLDOWN ensures it reads LOW when not pressed

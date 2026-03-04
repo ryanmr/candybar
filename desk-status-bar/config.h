@@ -44,6 +44,11 @@
 #define BRIGHTNESS    200         // 0-255 backlight brightness
 #endif
 
+// -- Critter Pet --
+#ifndef CRITTER_ENABLED
+#define CRITTER_ENABLED  1          // 1=show critter, 0=disable
+#endif
+
 // -- Update Intervals (milliseconds) --
 #ifndef WEATHER_INTERVAL
 #define WEATHER_INTERVAL  (10 * 60 * 1000)  // 10 minutes
