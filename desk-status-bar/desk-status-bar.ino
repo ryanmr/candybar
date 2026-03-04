@@ -99,12 +99,87 @@ unsigned long lastTouchTime    = 0;
 int  currentPanel = 0;   // 0 = main, 1 = detail, 2 = system info
 bool wifiConnected = false;
 bool timeSynced    = false;
+bool onBattery     = false;    // true if booted from power button (battery)
+unsigned long pwrBtnDownAt = 0;  // millis when power button was first pressed
+bool pwrBtnWasDown = false;
+bool pwrBtnReady   = false;     // true once we've seen a LOW reading (button released)
 
 struct TouchPoint {
   int16_t x;
   int16_t y;
   bool pressed;
 };
+
+// =============================================================
+// TCA9554 I/O Expander Helpers
+// Address 0x20 on peripheral I2C bus (Wire1).
+// Pin 1: ADC voltage divider enable (LOW = enabled)
+// Pin 6: Battery power latch (HIGH = on, LOW = off)
+// =============================================================
+static const uint8_t TCA_REG_OUTPUT = 0x01;
+static const uint8_t TCA_REG_CONFIG = 0x03;
+
+uint8_t tca9554ReadReg(uint8_t reg) {
+  Wire1.beginTransmission(TCA9554_ADDR);
+  Wire1.write(reg);
+  Wire1.endTransmission(false);
+  Wire1.requestFrom((uint8_t)TCA9554_ADDR, (uint8_t)1);
+  return Wire1.available() ? Wire1.read() : 0xFF;
+}
+
+void tca9554WriteReg(uint8_t reg, uint8_t val) {
+  Wire1.beginTransmission(TCA9554_ADDR);
+  Wire1.write(reg);
+  Wire1.write(val);
+  Wire1.endTransmission();
+}
+
+void tca9554SetPin(uint8_t pin, bool high) {
+  // Set pin as output
+  uint8_t config = tca9554ReadReg(TCA_REG_CONFIG);
+  config &= ~(1 << pin);
+  tca9554WriteReg(TCA_REG_CONFIG, config);
+
+  // Set output level
+  uint8_t output = tca9554ReadReg(TCA_REG_OUTPUT);
+  if (high) output |= (1 << pin);
+  else      output &= ~(1 << pin);
+  tca9554WriteReg(TCA_REG_OUTPUT, output);
+}
+
+void latchPowerOn() {
+  Wire1.beginTransmission(TCA9554_ADDR);
+  uint8_t err = Wire1.endTransmission();
+  if (err != 0) {
+    Serial.printf("[Power] TCA9554 not found at 0x%02X (err=%d)\n", TCA9554_ADDR, err);
+    return;
+  }
+
+  tca9554SetPin(TCA9554_PWR_PIN, true);   // Keep power on
+  Serial.println("[Power] Latch ON");
+}
+
+void powerOff() {
+  Serial.println("[Power] Shutting down...");
+  gfx->fillScreen(0x0000);
+  gfx->setTextColor(gfx->color565(255, 80, 80));
+  gfx->setTextSize(3);
+  gfx->setCursor(220, 60);
+  gfx->print("Powering off...");
+  gfx->flush();
+  delay(500);
+
+  // Turn off backlight
+  digitalWrite(LCD_BL_PIN, HIGH);
+
+  // Release power latch — board will lose power
+  tca9554SetPin(TCA9554_PWR_PIN, false);
+
+  // If still alive (USB power), wait briefly then reboot
+  // instead of sitting dark forever (which requires a power cycle to fix)
+  delay(2000);
+  ESP.restart();
+}
 
 // =============================================================
 // WiFi
@@ -201,16 +276,16 @@ void fetchWeather() {
 
 // =============================================================
 // Battery Voltage
+// TODO: Enable TCA9554 pin 1 (ADC divider) and read ADC1_CH3
+// after confirming it doesn't interfere with the QSPI display.
 // =============================================================
 float getBatteryVoltage() {
-  // TODO: read battery voltage via AXP2101 over I2C
-  // No direct ADC pin on this board revision
-  return 3.7f; // placeholder
+  return 0.0f; // placeholder — ADC not yet enabled
 }
 
 int getBatteryPercent(float voltage) {
-  // Rough LiPo estimate: 3.0V = 0%, 4.2V = 100%
-  int pct = (int)((voltage - 3.0f) / 1.2f * 100.0f);
+  // LiPo curve: 3.2V = 0%, 4.15V = 100% (conservative)
+  int pct = (int)((voltage - 3.2f) / 0.95f * 100.0f);
   return constrain(pct, 0, 100);
 }
 
@@ -385,23 +460,10 @@ void drawMainPanel() {
     gfx->print("WiFi OFF");
   }
 
-  // Battery
-  float batV = getBatteryVoltage();
-  int batPct = getBatteryPercent(batV);
-  gfx->setCursor(522, 68);
-  if (batPct > 50)      gfx->setTextColor(GOOD_COLOR);
-  else if (batPct > 20) gfx->setTextColor(WARN_COLOR);
-  else                   gfx->setTextColor(ERR_COLOR);
-
-  char batBuf[16];
-  snprintf(batBuf, sizeof(batBuf), "Bat: %d%%", batPct);
-  gfx->print(batBuf);
-
-  char batVBuf[10];
-  snprintf(batVBuf, sizeof(batVBuf), "%.2fV", batV);
+  // Battery (placeholder until ADC is confirmed safe with QSPI)
+  gfx->setCursor(522, 60);
   gfx->setTextColor(TEXT_DIM);
-  gfx->setCursor(522, 85);
-  gfx->print(batVBuf);
+  gfx->print("Bat: --");
 
   // Uptime
   unsigned long uptimeSec = millis() / 1000;
@@ -495,15 +557,22 @@ TouchPoint readTouch() {
 // Setup
 // =============================================================
 void setup() {
+  // CRITICAL: Latch power ASAP — on battery, the board dies when
+  // the power button is released unless we grab the latch first.
+  Wire.begin(TOUCH_SDA, TOUCH_SCL);   // Bus 0: touch controller
+  Wire1.begin(I2C_SDA, I2C_SCL);      // Bus 1: peripherals (has TCA9554)
+  delay(20);                           // Let TCA9554 stabilize after power-on
+  latchPowerOn();
+
   Serial.begin(115200);
-  delay(500);
+  delay(300);
   Serial.println("\n=============================");
   Serial.println("  Desk Status Bar — Booting");
   Serial.println("=============================\n");
 
-  // Init I2C buses — touch is on a separate bus from peripherals
-  Wire.begin(TOUCH_SDA, TOUCH_SCL);   // Bus 0: touch controller
-  Wire1.begin(I2C_SDA, I2C_SCL);      // Bus 1: IMU, RTC, etc.
+  // Power button read pin (GPIO 16) — HIGH when pressed
+  // INPUT_PULLDOWN ensures it reads LOW when not pressed
+  pinMode(BTN_PWR_READ, INPUT_PULLDOWN);
 
   // Init display + canvas
   if (!gfx->begin()) {
@@ -573,6 +642,25 @@ void loop() {
     WiFi.reconnect();
     delay(5000);
     wifiConnected = (WiFi.status() == WL_CONNECTED);
+  }
+
+  // Handle power button long-press (3 seconds → power off)
+  // GPIO 16 is active-HIGH: HIGH = pressed, LOW = released
+  // Safety: we must see the button released (LOW) at least once after boot
+  // before arming, so a held-down button at boot doesn't auto-shutdown.
+  bool pwrDown = digitalRead(BTN_PWR_READ);
+  if (!pwrBtnReady) {
+    // Wait until button is released after boot
+    if (!pwrDown) pwrBtnReady = true;
+  } else {
+    if (pwrDown && !pwrBtnWasDown) {
+      pwrBtnDownAt = now;
+      pwrBtnWasDown = true;
+    } else if (!pwrDown) {
+      pwrBtnWasDown = false;
+    } else if (pwrDown && pwrBtnWasDown && (now - pwrBtnDownAt >= 3000)) {
+      powerOff();
+    }
   }
 
   // Handle touch input
