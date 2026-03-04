@@ -40,13 +40,24 @@
 
 // -- Buttons --
 #define BTN_PWR       0
+#define BTN_PWR_READ  16    // GPIO16 reads HIGH when PWR button pressed
 
 // -- I2C Device Addresses --
-#define AXP2101_ADDR  0x34  // Power management (not present on this board)
+#define TCA9554_ADDR  0x20  // I/O expander (power latch, on peripheral bus)
 #define QMI8658_ADDR  0x6B  // IMU
 #define PCF85063_ADDR 0x51  // RTC
 #define ES8311_ADDR   0x18  // Audio codec
 #define TOUCH_ADDR    0x3B  // AXS15231B touch
+
+// -- Battery ADC --
+// Battery voltage is on ADC1 Channel 3 (GPIO 4), behind a 3:1 divider.
+// TCA9554 pin 1 must be set LOW to enable the voltage divider.
+#define BAT_ADC_PIN      4
+#define BAT_DIVIDER      3.0f   // voltage divider ratio
+
+// -- TCA9554 I/O Expander Pin Assignments --
+#define TCA9554_ADC_EN   1      // LOW = enable battery voltage divider
+#define TCA9554_PWR_PIN  6      // HIGH = power latch on, LOW = power off
 
 // -- Display Dimensions --
 #define LCD_WIDTH     172
