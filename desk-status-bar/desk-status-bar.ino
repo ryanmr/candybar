@@ -276,11 +276,13 @@ void fetchWeather() {
 
 // =============================================================
 // Battery Voltage
-// TODO: Enable TCA9554 pin 1 (ADC divider) and read ADC1_CH3
-// after confirming it doesn't interfere with the QSPI display.
+// ADC1 reads (both Arduino analogRead and ESP-IDF oneshot)
+// interfere with the QSPI display on this board. GPIO 4
+// (ADC1_CH3) shares ADC1 hardware with GPIO 9/10 (QSPI CS/CLK).
+// Battery % is not readable without an external I2C ADC.
 // =============================================================
 float getBatteryVoltage() {
-  return 0.0f; // placeholder — ADC not yet enabled
+  return 0.0f;
 }
 
 int getBatteryPercent(float voltage) {
@@ -453,7 +455,7 @@ void drawMainPanel() {
     gfx->print("No WiFi");
   }
 
-  // Battery (placeholder until ADC is confirmed safe with QSPI)
+  // Battery — ADC1 conflicts with QSPI, not readable on this board
   gfx->setTextSize(2);
   gfx->setTextColor(TEXT_DIM);
   gfx->setCursor(544, 58);
