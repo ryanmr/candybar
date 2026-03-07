@@ -32,11 +32,11 @@
 #define TOUCH_INT     3
 
 // -- I2S Audio --
-#define I2S_BCLK      9
-#define I2S_LRCK      7
-#define I2S_SDOUT     5
-#define I2S_MCLK      16
-#define I2S_SDIN      15  // Mic input
+#define I2S_MCLK      7
+#define I2S_BCLK      15
+#define I2S_LRCK      46
+#define I2S_SDOUT     45
+#define I2S_SDIN      6   // Mic input
 
 // -- Buttons --
 #define BTN_PWR       0
@@ -58,6 +58,7 @@
 // -- TCA9554 I/O Expander Pin Assignments --
 #define TCA9554_ADC_EN   1      // LOW = enable battery voltage divider
 #define TCA9554_PWR_PIN  6      // HIGH = power latch on, LOW = power off
+#define TCA9554_PA_EN    7      // HIGH = enable speaker amplifier
 
 // -- Display Dimensions --
 #define LCD_WIDTH     172

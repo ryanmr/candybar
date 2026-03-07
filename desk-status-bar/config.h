@@ -49,12 +49,17 @@
 #define CRITTER_ENABLED  1          // 1=show critter, 0=disable
 #endif
 
+// -- Touch Sound --
+#ifndef TOUCH_SOUND_ENABLED
+#define TOUCH_SOUND_ENABLED  1    // 1=click on touch, 0=silent
+#endif
+
 // -- Auto-Dim --
 #ifndef DIM_TIMEOUT_MIN
 #define DIM_TIMEOUT_MIN  5        // minutes of no motion before dimming
 #endif
 #ifndef DIM_BRIGHTNESS
-#define DIM_BRIGHTNESS   25       // ~10% brightness when dimmed
+#define DIM_BRIGHTNESS   60       // ~24% brightness when dimmed (below ~50 the backlight may turn fully off)
 #endif
 
 // -- Update Intervals (milliseconds) --

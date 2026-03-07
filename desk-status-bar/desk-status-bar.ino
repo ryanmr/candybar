@@ -27,6 +27,7 @@
 #include <ArduinoJson.h>
 #include <time.h>
 #include <Wire.h>
+#include <Preferences.h>
 #include <SensorQMI8658.hpp>
 
 // Use SPI3_HOST for QSPI display (matches Waveshare reference design)
@@ -169,6 +170,11 @@ bool critterBlink = false;
 unsigned long critterEdgeTime = 0;  // when critter first entered edge zone
 bool critterInEdge = false;
 int critterDirTicks = 0;           // ticks spent walking in current direction
+
+// -- Touch focus ring state --
+int8_t focusCol = -1;                // which column was last tapped (-1 = none)
+unsigned long focusTouchTime = 0;    // when the focus ring was triggered
+#define FOCUS_DURATION_MS 600        // how long the ring stays visible
 
 struct TouchPoint {
   int16_t x;
@@ -408,6 +414,87 @@ void fetchAQI() {
 }
 
 // =============================================================
+// NVS Cache — persist weather data across restarts
+// =============================================================
+Preferences prefs;
+
+void saveWeatherCache() {
+  prefs.begin("weather", false);  // read-write
+  prefs.putFloat("temp", weather.temp);
+  prefs.putFloat("feels", weather.feels_like);
+  prefs.putInt("humidity", weather.humidity);
+  prefs.putString("desc", weather.description);
+  prefs.putString("icon", weather.icon);
+  prefs.putFloat("lat", weather.lat);
+  prefs.putFloat("lon", weather.lon);
+  prefs.putULong("sunrise", weather.sunrise);
+  prefs.putULong("sunset", weather.sunset);
+  prefs.putInt("aqi", weather.aqi);
+  prefs.putFloat("pm25", weather.pm2_5);
+  prefs.putFloat("wind_spd", weather.wind_speed);
+  prefs.putInt("wind_deg", weather.wind_deg);
+  prefs.putInt("clouds", weather.clouds);
+  prefs.putInt("pressure", weather.pressure);
+  prefs.putInt("vis", weather.visibility);
+  prefs.putBool("valid", weather.valid);
+  prefs.putULong("epoch", (unsigned long)time(nullptr));
+  prefs.end();
+  Serial.println("[Cache] Weather data saved to NVS");
+}
+
+bool loadWeatherCache() {
+  prefs.begin("weather", true);  // read-only
+  bool valid = prefs.getBool("valid", false);
+  if (!valid) {
+    prefs.end();
+    Serial.println("[Cache] No cached weather data");
+    return false;
+  }
+
+  weather.temp       = prefs.getFloat("temp", 0.0f);
+  weather.feels_like = prefs.getFloat("feels", 0.0f);
+  weather.humidity   = prefs.getInt("humidity", 0);
+  String desc = prefs.getString("desc", "unknown");
+  strlcpy(weather.description, desc.c_str(), sizeof(weather.description));
+  String icon = prefs.getString("icon", "01d");
+  strlcpy(weather.icon, icon.c_str(), sizeof(weather.icon));
+  weather.lat        = prefs.getFloat("lat", 0.0f);
+  weather.lon        = prefs.getFloat("lon", 0.0f);
+  weather.sunrise    = prefs.getULong("sunrise", 0);
+  weather.sunset     = prefs.getULong("sunset", 0);
+  weather.aqi        = prefs.getInt("aqi", 0);
+  weather.pm2_5      = prefs.getFloat("pm25", 0.0f);
+  weather.wind_speed = prefs.getFloat("wind_spd", 0.0f);
+  weather.wind_deg   = prefs.getInt("wind_deg", 0);
+  weather.clouds     = prefs.getInt("clouds", 0);
+  weather.pressure   = prefs.getInt("pressure", 0);
+  weather.visibility = prefs.getInt("vis", 0);
+  weather.valid      = true;
+  prefs.end();
+
+  Serial.printf("[Cache] Loaded cached weather: %.0f°, %s\n", weather.temp, weather.description);
+
+  return true;
+}
+
+bool isWeatherCacheFresh() {
+  prefs.begin("weather", true);
+  unsigned long savedEpoch = prefs.getULong("epoch", 0);
+  prefs.end();
+  if (savedEpoch == 0) return false;
+
+  unsigned long nowEpoch = (unsigned long)time(nullptr);
+  // time(nullptr) returns 0 or small values before NTP sync
+  if (nowEpoch < 1000000) return false;
+
+  unsigned long age = nowEpoch - savedEpoch;
+  unsigned long maxAge = WEATHER_INTERVAL / 1000;  // convert ms to seconds
+  bool fresh = (age < maxAge);
+  Serial.printf("[Cache] Weather age: %lus, max: %lus → %s\n", age, maxAge, fresh ? "fresh" : "stale");
+  return fresh;
+}
+
+// =============================================================
 // Battery Voltage
 // Sampled at boot and refreshed every 60 seconds in loop().
 // =============================================================
@@ -495,6 +582,137 @@ void updateAutoDim() {
     Serial.println("[Dim] No motion, dimming backlight");
   }
 }
+
+// =============================================================
+// Audio — ES8311 codec + I2S click feedback
+// =============================================================
+#if TOUCH_SOUND_ENABLED
+#include <ESP_I2S.h>
+
+I2SClass i2sOut;
+bool audioReady = false;
+
+void es8311WriteReg(uint8_t reg, uint8_t val) {
+  Wire1.beginTransmission(ES8311_ADDR);
+  Wire1.write(reg);
+  Wire1.write(val);
+  Wire1.endTransmission();
+}
+
+bool es8311Init() {
+  // Verify codec is present
+  Wire1.beginTransmission(ES8311_ADDR);
+  if (Wire1.endTransmission() != 0) {
+    Serial.println("[Audio] ES8311 not found");
+    return false;
+  }
+  Serial.println("[Audio] ES8311 found at 0x18");
+
+  // Reset all registers
+  es8311WriteReg(0x00, 0x1F);
+  delay(20);
+  es8311WriteReg(0x00, 0x00);
+  delay(20);
+
+  // Clock config: MCLK from pin, auto clock gates
+  es8311WriteReg(0x01, 0x30);  // VMIDSEL=1, clock gates on
+  es8311WriteReg(0x02, 0x00);  // MCLK source = from pin
+  es8311WriteReg(0x03, 0x10);  // MCLK pre-divider
+  es8311WriteReg(0x04, 0x10);  // BCLK divider
+  es8311WriteReg(0x05, 0x00);  // CLK ADC/DAC config
+  es8311WriteReg(0x06, 0x01);  // BCLK divider for LRCK
+  es8311WriteReg(0x07, 0x00);  // LRCK high byte
+  es8311WriteReg(0x08, 0xFF);  // LRCK low byte
+
+  // I2S format: standard I2S, 16-bit
+  es8311WriteReg(0x09, 0x0C);  // DAC serial port: I2S 16-bit
+  es8311WriteReg(0x0A, 0x0C);  // ADC serial port: I2S 16-bit
+
+  // System power config
+  es8311WriteReg(0x0B, 0x00);  // System: normal mode
+  es8311WriteReg(0x0C, 0x00);  // System: normal mode
+  es8311WriteReg(0x10, 0x1F);  // Analog power: VREF on, all bias on
+  es8311WriteReg(0x11, 0x7F);  // Analog power: DAC + headphone on
+
+  // GPIO config
+  es8311WriteReg(0x0D, 0x01);
+  es8311WriteReg(0x0E, 0x02);
+  es8311WriteReg(0x0F, 0x44);
+
+  // ADC config (not used but set to known state)
+  es8311WriteReg(0x12, 0x00);  // ADC: unmute
+  es8311WriteReg(0x13, 0x00);
+  es8311WriteReg(0x14, 0x1A);  // ADC volume
+
+  // DAC config
+  es8311WriteReg(0x15, 0x00);  // DAC: soft volume on
+  es8311WriteReg(0x16, 0x24);  // DAC config
+  es8311WriteReg(0x17, 0x08);  // DAC automute config
+  es8311WriteReg(0x18, 0x00);
+  es8311WriteReg(0x19, 0x00);
+  es8311WriteReg(0x1A, 0x00);
+  es8311WriteReg(0x1B, 0x0A);  // DAC ramp rate
+  es8311WriteReg(0x1C, 0x6A);  // DAC low power mode
+
+  // DAC volume — register 0x32 is the actual volume control
+  es8311WriteReg(0x32, 0xBF);  // ~75% volume
+
+  // Mixer: DAC to output, no ADC mix
+  es8311WriteReg(0x37, 0x08);
+
+  // Power up — start oscillator + DAC
+  es8311WriteReg(0x00, 0x80);
+  delay(50);
+
+  Serial.println("[Audio] ES8311 initialized");
+  return true;
+}
+
+void audioSetup() {
+  // Init ES8311 codec first (before enabling PA to avoid pop)
+  if (!es8311Init()) return;
+
+  // Enable speaker amplifier via TCA9554 pin 7
+  tca9554SetPin(TCA9554_PA_EN, true);
+  delay(10);
+
+  // Start I2S — 8kHz mono 16-bit
+  i2sOut.setPins(I2S_BCLK, I2S_LRCK, I2S_SDOUT, I2S_SDIN, I2S_MCLK);
+  if (!i2sOut.begin(I2S_MODE_STD, 8000, I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO)) {
+    Serial.println("[Audio] I2S begin failed");
+    return;
+  }
+
+  audioReady = true;
+  Serial.println("[Audio] I2S started, audio ready");
+}
+
+void playClick() {
+  if (!audioReady) return;
+
+  // 64-sample click at 8kHz (~8ms): loud decaying square wave + silence pad
+  // Larger buffer ensures I2S DMA actually flushes to the codec
+  static const int16_t click[64] = {
+    // Sharp attack — full amplitude square wave
+     30000, -30000,  30000, -30000,
+     28000, -28000,  28000, -28000,
+    // Decay
+     24000, -24000,  20000, -20000,
+     16000, -16000,  12000, -12000,
+     10000, -10000,   8000,  -8000,
+      6000,  -6000,   4000,  -4000,
+      3000,  -3000,   2000,  -2000,
+      1000,  -1000,    500,   -500,
+    // Silence pad (32 samples) to flush DMA
+     0, 0, 0, 0, 0, 0, 0, 0,
+     0, 0, 0, 0, 0, 0, 0, 0,
+     0, 0, 0, 0, 0, 0, 0, 0,
+     0, 0, 0, 0, 0, 0, 0, 0
+  };
+
+  i2sOut.write((uint8_t*)click, sizeof(click));
+}
+#endif // TOUCH_SOUND_ENABLED
 
 // =============================================================
 // Drawing Helpers
@@ -647,85 +865,87 @@ void updateCritter() {
 
 void drawCritter() {
   int cx = (int)critterX;
-  int cy = SCREEN_H - 18 - (int)critterY;
+  int groundY = SCREEN_H - 15;
+  int cy = groundY - (int)critterY;
   int dir = critterDir;  // 1=right, -1=left
   bool sleeping = (critterState == CRIT_SLEEPING);
 
-  // Body — round torso (radius 11)
-  gfx->fillCircle(cx, cy, 11, CRITTER_BODY);
+  // Body — oval torso (two overlapping circles, radius 8)
+  gfx->fillCircle(cx, cy, 8, CRITTER_BODY);
+  gfx->fillCircle(cx + dir * 2, cy, 7, CRITTER_BODY);
   // Belly highlight — lighter circle shifted down
-  gfx->fillCircle(cx, cy + 3, 9, CRITTER_HIGHLIGHT);
+  gfx->fillCircle(cx, cy + 2, 6, CRITTER_HIGHLIGHT);
 
   // Head — overlapping circle at top-front of body
-  int hx = cx + dir * 8;
-  int hy = cy - 8;
-  if (sleeping) hy = cy - 5;  // head droops when sleeping
-  gfx->fillCircle(hx, hy, 6, CRITTER_BODY);
+  int hx = cx + dir * 6;
+  int hy = cy - 6;
+  if (sleeping) hy = cy - 4;  // head droops when sleeping
+  gfx->fillCircle(hx, hy, 5, CRITTER_BODY);
 
   // Beak — small orange triangle pointing in walk direction
-  int bx = hx + dir * 6;
+  int bx = hx + dir * 5;
   int by = hy;
-  gfx->fillTriangle(bx, by, bx + dir * 6, by + 1, bx, by + 4, CRITTER_BEAK);
+  gfx->fillTriangle(bx, by, bx + dir * 5, by + 1, bx, by + 3, CRITTER_BEAK);
 
   // Eye — single eye on the visible side
-  int ex = hx + dir * 3;
+  int ex = hx + dir * 2;
   int ey = hy - 1;
   if (sleeping || critterBlink) {
     // Closed eye — horizontal line
-    gfx->drawFastHLine(ex - 1, ey, 4, CRITTER_EYE);
+    gfx->drawFastHLine(ex - 1, ey, 3, CRITTER_EYE);
   } else {
     gfx->fillCircle(ex, ey, 1, CRITTER_EYE);
   }
 
   // Cheek blush — small pink spot below eye
-  gfx->fillRect(hx + dir * 1, hy + 3, 3, 3, CRITTER_CHEEK);
+  gfx->fillRect(hx + dir * 1, hy + 2, 2, 2, CRITTER_CHEEK);
 
   // Wing — overlapping circle on body, deeper blue
-  int wx = cx - dir * 3;
+  int wx = cx - dir * 2;
   int wy = cy - 1;
   if (critterState == CRIT_JUMPING || critterState == CRIT_WAVING) {
     // Wing raised — shifted up
     int wingWiggle = ((critterAnimTick / 4) % 2 == 0) ? -3 : 0;
-    gfx->fillCircle(wx, wy - 6 + wingWiggle, 6, CRITTER_WING);
+    gfx->fillCircle(wx, wy - 5 + wingWiggle, 4, CRITTER_WING);
   } else if (critterState == CRIT_WALKING) {
     // Wing bobs slightly while walking
     int wingBob = ((critterAnimTick / 4) % 2 == 0) ? -1 : 0;
-    gfx->fillCircle(wx, wy + wingBob, 6, CRITTER_WING);
+    gfx->fillCircle(wx, wy + wingBob, 4, CRITTER_WING);
   } else {
     // Idle/sleeping — wing resting at side
-    gfx->fillCircle(wx, wy, 6, CRITTER_WING);
+    gfx->fillCircle(wx, wy, 4, CRITTER_WING);
   }
 
   // Tail — triangle at back of body, opposite to direction
-  int tx = cx - dir * 11;
-  int ty = cy - 3;
-  gfx->fillTriangle(tx, ty, tx - dir * 8, ty - 6, tx - dir * 5, ty + 1, CRITTER_WING);
+  int tx = cx - dir * 8;
+  int ty = cy - 2;
+  gfx->fillTriangle(tx, ty, tx - dir * 6, ty - 5, tx - dir * 4, ty + 1, CRITTER_WING);
 
   // Legs — two thin rectangles below body with small feet
   if (critterState == CRIT_JUMPING) {
     // Legs tucked up during jump
-    gfx->fillRect(cx - 4, cy + 9, 2, 4, CRITTER_BEAK);
-    gfx->fillRect(cx + 3, cy + 9, 2, 4, CRITTER_BEAK);
+    gfx->fillRect(cx - 3, cy + 6, 2, 3, CRITTER_BEAK);
+    gfx->fillRect(cx + 2, cy + 6, 2, 3, CRITTER_BEAK);
   } else {
     // Walking: alternate leg positions
     int legOff = (critterState == CRIT_WALKING && (critterAnimTick / 4) % 2 == 0) ? 2 : 0;
     // Left leg
-    gfx->fillRect(cx - 4, cy + 10 - legOff, 2, 5, CRITTER_BEAK);
-    gfx->fillRect(cx - 5, cy + 14 - legOff, 4, 1, CRITTER_BEAK);  // foot
+    gfx->fillRect(cx - 3, cy + 7 - legOff, 2, 4, CRITTER_BEAK);
+    gfx->fillRect(cx - 4, cy + 10 - legOff, 3, 1, CRITTER_BEAK);  // foot
     // Right leg
-    gfx->fillRect(cx + 3, cy + 10 + legOff, 2, 5, CRITTER_BEAK);
-    gfx->fillRect(cx + 1, cy + 14 + legOff, 4, 1, CRITTER_BEAK);  // foot
+    gfx->fillRect(cx + 2, cy + 7 + legOff, 2, 4, CRITTER_BEAK);
+    gfx->fillRect(cx + 1, cy + 10 + legOff, 3, 1, CRITTER_BEAK);  // foot
   }
 
   // Sleeping ZZZ
   if (sleeping) {
-    int zy = hy - 10 - ((critterAnimTick / 7) % 3) * 5;
+    int zy = hy - 8 - ((critterAnimTick / 7) % 3) * 5;
     gfx->setTextColor(TEXT_SECONDARY);
     gfx->setTextSize(1);
-    gfx->setCursor(hx + 8, zy);
+    gfx->setCursor(hx + 6, zy);
     gfx->print("z");
     if ((critterAnimTick / 7) % 6 < 3) {
-      gfx->setCursor(hx + 15, zy - 9);
+      gfx->setCursor(hx + 13, zy - 9);
       gfx->print("z");
     }
   }
@@ -1282,23 +1502,46 @@ void drawWeatherTile2(int px, int py, int pw, int ph) {
   gfx->print(buf);
 }
 
+// ── WiFi Signal Bars ────────────────────────────────────────
+void drawWifiSignalBars(int x, int y, int rssi) {
+  // 4 bars of increasing height, 5px wide, 3px gap
+  // Thresholds: >-50=4 bars, >-60=3, >-70=2, >-80=1, else 0
+  int bars = 0;
+  if      (rssi > -50) bars = 4;
+  else if (rssi > -60) bars = 3;
+  else if (rssi > -70) bars = 2;
+  else if (rssi > -80) bars = 1;
+
+  int barW = 5;
+  int gap = 3;
+  int heights[] = { 5, 10, 15, 20 };
+
+  for (int i = 0; i < 4; i++) {
+    int bx = x + i * (barW + gap);
+    int bh = heights[i];
+    int by = y + 20 - bh;  // align bottoms
+    uint16_t color = (i < bars) ? GOOD_COLOR : TEXT_DIM;
+    gfx->fillRect(bx, by, barW, bh, color);
+  }
+}
+
 // ── STATUS tile 0: WiFi + Battery + Uptime ──────────────────
 void drawStatusTile0(int px, int py, int pw, int ph) {
-  // WiFi status
-  gfx->setTextSize(2);
-  gfx->setCursor(px + 10, py + 8);
+  // WiFi signal bars
   if (wifiConnected) {
-    gfx->setTextColor(GOOD_COLOR);
-    gfx->print("WiFi");
-    gfx->setTextSize(1);
-    gfx->setTextColor(TEXT_DIM);
-    gfx->setCursor(px + 10, py + 30);
     int rssi = WiFi.RSSI();
+    drawWifiSignalBars(px + 10, py + 8, rssi);
+    // Small dBm label below bars
+    gfx->setTextColor(TEXT_DIM);
+    gfx->setTextSize(1);
     char rssiBuf[12];
     snprintf(rssiBuf, sizeof(rssiBuf), "%ddBm", rssi);
+    gfx->setCursor(px + 10, py + 32);
     gfx->print(rssiBuf);
   } else {
     gfx->setTextColor(ERR_COLOR);
+    gfx->setTextSize(2);
+    gfx->setCursor(px + 10, py + 8);
     gfx->print("No WiFi");
   }
 
@@ -1333,12 +1576,6 @@ void drawStatusTile0(int px, int py, int pw, int ph) {
   gfx->setTextColor(TEXT_DIM);
   gfx->setCursor(px + 10, py + 92);
   gfx->print(uptBuf);
-
-  // Free heap
-  char heapBuf[8];
-  snprintf(heapBuf, sizeof(heapBuf), "%dK", ESP.getFreeHeap() / 1024);
-  gfx->setCursor(px + 10, py + 122);
-  gfx->print(heapBuf);
 }
 
 // ── STATUS tile 1: System Info ──────────────────────────────
@@ -1403,11 +1640,11 @@ void drawStatusTile1(int px, int py, int pw, int ph) {
 void drawTileIndicator(int px, int py, int pw, int ph, int numTiles, int active) {
   if (numTiles <= 1) return;
 
-  int dotR = 2;
-  int spacing = 8;
+  int dotR = 3;
+  int spacing = 12;
   int totalW = numTiles * (dotR * 2) + (numTiles - 1) * (spacing - dotR * 2);
-  int startX = px + (pw - totalW * 1) / 2;
-  int dotY = py + ph - 6;
+  int startX = px + (pw - totalW) / 2;
+  int dotY = py + ph - 10;
 
   for (int i = 0; i < numTiles; i++) {
     int dx = startX + i * spacing;
@@ -1490,6 +1727,19 @@ void drawMainPanel() {
       }
 
       drawTileIndicator(px, py, pw, ph, COL_GEOM[c].numTiles, currentTile[c]);
+
+      // Focus ring — fading highlight border on recently-tapped column
+      unsigned long focusAge = millis() - focusTouchTime;
+      if (focusCol == c && focusAge < FOCUS_DURATION_MS) {
+        float elapsed = (float)focusAge / (float)FOCUS_DURATION_MS;
+        // Fade from bright accent to invisible
+        uint8_t r = (uint8_t)(99 + (1.0f - elapsed) * 120);
+        uint8_t g = (uint8_t)(140 + (1.0f - elapsed) * 80);
+        uint8_t b = (uint8_t)(255);
+        uint16_t ringColor = gfx->color565(r, g, b);
+        gfx->drawRoundRect(px, py, pw, ph, 8, ringColor);
+        gfx->drawRoundRect(px + 1, py + 1, pw - 2, ph - 2, 7, ringColor);
+      }
     }
 
 #if CRITTER_ENABLED
@@ -1575,6 +1825,27 @@ TouchPoint readTouch() {
 // Touch Navigation
 // =============================================================
 void handleTouch(int lx, int ly, unsigned long now) {
+#if CRITTER_ENABLED
+  // Check if tap is near the critter (~20px radius)
+  int groundY = SCREEN_H - 15;
+  int critterScreenY = groundY - (int)critterY;
+  float cdx = (float)lx - critterX;
+  float cdy = (float)ly - (float)critterScreenY;
+  if (cdx * cdx + cdy * cdy < 20.0f * 20.0f) {
+    if (critterState == CRIT_SLEEPING) {
+      critterState = CRIT_IDLE;
+      critterStateTicks = 0;
+      critterIdleTicks = 0;
+      Serial.println("[Critter] Pet detected! Waking up!");
+    } else {
+      critterState = CRIT_WAVING;
+      critterStateTicks = 0;
+      Serial.println("[Critter] Pet detected!");
+    }
+    return;  // consume the touch
+  }
+#endif
+
   // Edge zones: page navigation
   if (lx < 30) {
     if (currentPage > 0) {
@@ -1601,6 +1872,10 @@ void handleTouch(int lx, int ly, unsigned long now) {
     int cx = COL_GEOM[c].x;
     int cw = COL_GEOM[c].w;
     if (lx >= cx && lx < cx + cw) {
+      // Trigger focus ring on this column
+      focusCol = c;
+      focusTouchTime = now;
+
       uint8_t numT = COL_GEOM[c].numTiles;
       if (numT <= 1) return;  // no tiles to cycle
 
@@ -1672,6 +1947,9 @@ void setup() {
   lastMotionTime = millis();
   Serial.println("[Backlight] On (PWM)");
 
+  // Load cached weather from NVS (shows data immediately while WiFi connects)
+  loadWeatherCache();
+
   // Splash
   drawSplash("Connecting to WiFi...");
 
@@ -1686,12 +1964,18 @@ void setup() {
     syncTime();
   }
 
-  // Initial weather fetch
+  // Initial weather fetch — skip if cache is still fresh (saves API hits during dev)
   if (wifiConnected) {
-    drawSplash("Fetching weather...");
-    fetchWeather();
-    fetchAQI();
-    lastWeatherFetch = millis();
+    if (isWeatherCacheFresh()) {
+      Serial.println("[Boot] Weather cache is fresh, skipping fetch");
+      lastWeatherFetch = millis();
+    } else {
+      drawSplash("Fetching weather...");
+      fetchWeather();
+      fetchAQI();
+      saveWeatherCache();
+      lastWeatherFetch = millis();
+    }
   }
 
 #if CRITTER_ENABLED
@@ -1714,6 +1998,11 @@ void setup() {
   }
 #endif
 
+#if TOUCH_SOUND_ENABLED
+  drawSplash("Setting up audio...");
+  audioSetup();
+#endif
+
   drawSplash("Ready!");
   delay(400);
 
@@ -1725,6 +2014,15 @@ void setup() {
 // =============================================================
 void loop() {
   unsigned long now = millis();
+
+#if TOUCH_SOUND_ENABLED
+  // One-shot audio diagnostic (prints once, ~5s after boot so USB CDC is ready)
+  static bool audioDiagPrinted = false;
+  if (!audioDiagPrinted && now > 5000) {
+    audioDiagPrinted = true;
+    Serial.printf("[Audio] Diagnostic: audioReady=%d\n", audioReady);
+  }
+#endif
 
   // Read IMU + update auto-dim (before draw so motion restores brightness immediately)
   readIMU();
@@ -1746,6 +2044,7 @@ void loop() {
     Serial.println("[Loop] Refreshing weather...");
     fetchWeather();
     fetchAQI();
+    saveWeatherCache();
     lastWeatherFetch = now;
   }
 
@@ -1793,6 +2092,10 @@ void loop() {
     int lx = 639 - tp.x;
     int ly = tp.y;
     Serial.printf("[Touch] lx=%d ly=%d\n", lx, ly);
+
+#if TOUCH_SOUND_ENABLED
+    playClick();
+#endif
 
     handleTouch(lx, ly, now);
   }
