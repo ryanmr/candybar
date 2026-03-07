@@ -168,6 +168,7 @@ unsigned long critterBlinkTime = 0;
 bool critterBlink = false;
 unsigned long critterEdgeTime = 0;  // when critter first entered edge zone
 bool critterInEdge = false;
+int critterDirTicks = 0;           // ticks spent walking in current direction
 
 struct TouchPoint {
   int16_t x;
@@ -585,9 +586,16 @@ void updateCritter() {
       if (tilting) {
         critterVX = tiltForce;
         critterDir = (tiltForce > 0) ? 1 : -1;
+        critterDirTicks = 0;
       } else {
+        critterDirTicks++;
         critterVX += critterDir * 0.4f;
         critterVX = constrain(critterVX, -2.0f, 2.0f);
+        // After ~120 seconds (840 ticks at 7fps), 50% chance to flip direction
+        if (critterDirTicks > 840 && random(2) == 0) {
+          critterDir = -critterDir;
+          critterDirTicks = 0;
+        }
         if (critterStateTicks > 35 + (int)random(70)) {
           critterState = CRIT_IDLE;
           critterStateTicks = 0;
