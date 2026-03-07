@@ -97,9 +97,15 @@ struct WeatherData {
   char  description[32];
   char  icon[8];
   bool  valid;
+  float lat;
+  float lon;
+  unsigned long sunrise;
+  unsigned long sunset;
+  int   aqi;          // 1-5 scale from OWM
+  float pm2_5;
 };
 
-WeatherData weather = { 0, 0, 0, "loading...", "01d", false };
+WeatherData weather = { 0, 0, 0, "loading...", "01d", false, 0, 0, 0, 0, 0, 0 };
 
 unsigned long lastWeatherFetch  = 0;
 unsigned long lastClockUpdate   = 0;
@@ -288,6 +294,11 @@ void fetchWeather() {
               sizeof(weather.icon));
       weather.valid = true;
 
+      weather.lat     = doc["coord"]["lat"] | 0.0f;
+      weather.lon     = doc["coord"]["lon"] | 0.0f;
+      weather.sunrise = doc["sys"]["sunrise"] | 0UL;
+      weather.sunset  = doc["sys"]["sunset"]  | 0UL;
+
       // Capitalize first letter
       if (weather.description[0] >= 'a' && weather.description[0] <= 'z') {
         weather.description[0] -= 32;
@@ -305,6 +316,63 @@ void fetchWeather() {
 }
 
 // =============================================================
+// AQI (Air Quality Index)
+// =============================================================
+const char* aqiLabel(int aqi) {
+  switch (aqi) {
+    case 1: return "Good";
+    case 2: return "Fair";
+    case 3: return "Moderate";
+    case 4: return "Poor";
+    case 5: return "V.Poor";
+    default: return "??";
+  }
+}
+
+uint16_t aqiColor(int aqi) {
+  switch (aqi) {
+    case 1: return GOOD_COLOR;
+    case 2: return GOOD_COLOR;
+    case 3: return WARN_COLOR;
+    case 4: return ERR_COLOR;
+    case 5: return ERR_COLOR;
+    default: return TEXT_DIM;
+  }
+}
+
+void fetchAQI() {
+  if (!wifiConnected || weather.lat == 0.0f) return;
+
+  char url[160];
+  snprintf(url, sizeof(url),
+    "http://api.openweathermap.org/data/2.5/air_pollution?lat=%.4f&lon=%.4f&appid=%s",
+    weather.lat, weather.lon, OWM_API_KEY);
+
+  HTTPClient http;
+  http.begin(url);
+  http.setTimeout(10000);
+  int code = http.GET();
+
+  if (code == 200) {
+    String payload = http.getString();
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, payload);
+
+    if (!err) {
+      weather.aqi   = doc["list"][0]["main"]["aqi"] | 0;
+      weather.pm2_5 = doc["list"][0]["components"]["pm2_5"] | 0.0f;
+      Serial.printf("[AQI] %d (%s), PM2.5: %.1f\n", weather.aqi, aqiLabel(weather.aqi), weather.pm2_5);
+    } else {
+      Serial.printf("[AQI] JSON parse error: %s\n", err.c_str());
+    }
+  } else {
+    Serial.printf("[AQI] HTTP error: %d\n", code);
+  }
+
+  http.end();
+}
+
+// =============================================================
 // Battery Voltage
 // Sampled at boot and refreshed every 60 seconds in loop().
 // =============================================================
@@ -313,7 +381,7 @@ float cachedBatteryVoltage = 0.0f;
 void sampleBatteryOnce() {
   // Enable voltage divider
   tca9554SetPin(TCA9554_ADC_EN, false);
-  delay(10); // let divider settle
+  delayMicroseconds(500); // let divider settle (500µs vs 10ms to avoid display flicker)
 
   // Read raw ADC — using analogReadMilliVolts on GPIO 4 only
   int mv = analogReadMilliVolts(BAT_ADC_PIN);
@@ -694,6 +762,16 @@ void drawMainPanel() {
     gfx->setTextSize(1);
     gfx->setCursor(382, 106);
     gfx->print(detailBuf);
+
+    // AQI
+    if (weather.aqi > 0) {
+      char aqiBuf[28];
+      snprintf(aqiBuf, sizeof(aqiBuf), "AQI: %s (PM2.5: %.0f)", aqiLabel(weather.aqi), weather.pm2_5);
+      gfx->setTextColor(aqiColor(weather.aqi));
+      gfx->setTextSize(1);
+      gfx->setCursor(382, 120);
+      gfx->print(aqiBuf);
+    }
   } else {
     gfx->setTextColor(TEXT_DIM);
     gfx->setTextSize(2);
@@ -909,6 +987,7 @@ void setup() {
   if (wifiConnected) {
     drawSplash("Fetching weather...");
     fetchWeather();
+    fetchAQI();
     lastWeatherFetch = millis();
   }
 
@@ -959,6 +1038,7 @@ void loop() {
   if (wifiConnected && (now - lastWeatherFetch >= WEATHER_INTERVAL)) {
     Serial.println("[Loop] Refreshing weather...");
     fetchWeather();
+    fetchAQI();
     lastWeatherFetch = now;
   }
 
@@ -1005,6 +1085,7 @@ void loop() {
     if (wifiConnected) {
       drawSplash("Refreshing...");
       fetchWeather();
+      fetchAQI();
       lastWeatherFetch = now;
     }
   }
