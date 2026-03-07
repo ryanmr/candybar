@@ -80,10 +80,12 @@ Arduino_Canvas *gfx = new Arduino_Canvas(LCD_WIDTH, LCD_HEIGHT, display);
 #define WARN_COLOR     gfx->color565(255, 180, 60)    // amber
 #define ERR_COLOR      gfx->color565(255, 80, 80)     // red
 #define DIVIDER_COLOR  gfx->color565(50, 50, 65)      // subtle line
-#define CRITTER_BODY      gfx->color565(120, 200, 160)  // soft mint green
-#define CRITTER_HIGHLIGHT gfx->color565(160, 230, 190)  // lighter mint
-#define CRITTER_EYE       gfx->color565(240, 240, 250)  // near-white
+#define CRITTER_BODY      gfx->color565(130, 185, 230)  // soft sky blue
+#define CRITTER_HIGHLIGHT gfx->color565(180, 215, 245)  // lighter blue belly
+#define CRITTER_EYE       gfx->color565(30, 30, 40)     // near-black
 #define CRITTER_CHEEK     gfx->color565(255, 160, 160)  // pink blush
+#define CRITTER_BEAK      gfx->color565(240, 180, 70)   // warm orange
+#define CRITTER_WING      gfx->color565(100, 155, 210)  // deeper blue
 
 // =============================================================
 // State
@@ -113,6 +115,7 @@ bool pwrBtnReady   = false;     // true once we've seen a LOW reading (button re
 // -- IMU (QMI8658 accelerometer for critter tilt) --
 SensorQMI8658 qmi;
 bool qmiReady = false;
+float accelBaseX = 0.0f;       // resting tilt offset (calibrated at boot)
 
 // -- Critter pet state --
 enum CritterState { CRIT_IDLE, CRIT_WALKING, CRIT_JUMPING, CRIT_WAVING, CRIT_SLEEPING };
@@ -127,6 +130,8 @@ int critterIdleTicks = 0;
 int critterStateTicks = 0;
 unsigned long critterBlinkTime = 0;
 bool critterBlink = false;
+unsigned long critterEdgeTime = 0;  // when critter first entered edge zone
+bool critterInEdge = false;
 
 struct TouchPoint {
   int16_t x;
@@ -373,22 +378,24 @@ void updateCritter() {
     IMUdata gyro;
     if (qmi.getDataReady()) {
       if (qmi.getAccelerometer(acc.x, acc.y, acc.z)) {
-        tiltX = acc.x;
+        tiltX = acc.x - accelBaseX;
       }
       qmi.getGyroscope(gyro.x, gyro.y, gyro.z); // must read both
     }
   }
 
-  // Log accel every 10 ticks for debugging
-  if (qmiReady && critterAnimTick % 10 == 0) {
+  // Log accel every ~10 seconds (70 ticks at 7fps)
+  if (qmiReady && critterAnimTick % 70 == 0) {
     Serial.printf("[Critter] accel x=%.2f state=%d pos=%.0f\n", tiltX, critterState, critterX);
   }
 
-  // Dead zone ±0.5, map to ±20 px/tick max
+  // Dead zone ±1.0, map to ±3 px/tick max (at 7fps, 3*7=21 px/sec)
   float tiltForce = 0.0f;
-  if (tiltX > 0.5f) tiltForce = min((tiltX - 0.5f) * 6.0f, 20.0f);
-  else if (tiltX < -0.5f) tiltForce = max((tiltX + 0.5f) * 6.0f, -20.0f);
+  if (tiltX > 1.0f) tiltForce = min((tiltX - 1.0f) * 1.0f, 3.0f);
+  else if (tiltX < -1.0f) tiltForce = max((tiltX + 1.0f) * 1.0f, -3.0f);
   bool tilting = (fabsf(tiltForce) > 0.1f);
+
+  // (Corner escape removed — world wraps around)
 
   // Blink timer
   if (millis() - critterBlinkTime > 3000 + random(2000)) {
@@ -399,27 +406,27 @@ void updateCritter() {
     critterBlink = false;
   }
 
-  // State machine
+  // State machine (probabilities scaled for ~7fps)
   critterStateTicks++;
 
   switch (critterState) {
     case CRIT_IDLE:
-      critterVX *= 0.8f;
+      critterVX *= 0.9f;
       critterIdleTicks++;
-      if (tilting || random(100) < 10) {
+      if (tilting || random(700) < 10) {
         critterState = CRIT_WALKING;
         critterStateTicks = 0;
         critterIdleTicks = 0;
-      } else if (random(100) < 5) {
+      } else if (random(700) < 5) {
         critterState = CRIT_JUMPING;
         critterStateTicks = 0;
-        critterVY = 6.0f;
+        critterVY = 1.2f;
         critterIdleTicks = 0;
-      } else if (random(100) < 3) {
+      } else if (random(700) < 3) {
         critterState = CRIT_WAVING;
         critterStateTicks = 0;
         critterIdleTicks = 0;
-      } else if (critterIdleTicks > 30) {
+      } else if (critterIdleTicks > 210) {  // ~30 seconds at 7fps
         critterState = CRIT_SLEEPING;
         critterStateTicks = 0;
       }
@@ -430,23 +437,23 @@ void updateCritter() {
         critterVX = tiltForce;
         critterDir = (tiltForce > 0) ? 1 : -1;
       } else {
-        critterVX += critterDir * 3.0f;
-        critterVX = constrain(critterVX, -12.0f, 12.0f);
-        if (critterStateTicks > 5 + (int)random(10)) {
+        critterVX += critterDir * 0.4f;
+        critterVX = constrain(critterVX, -2.0f, 2.0f);
+        if (critterStateTicks > 35 + (int)random(70)) {
           critterState = CRIT_IDLE;
           critterStateTicks = 0;
         }
       }
-      if (random(100) < 8) {
+      if (random(700) < 8) {
         critterState = CRIT_JUMPING;
         critterStateTicks = 0;
-        critterVY = 6.0f;
+        critterVY = 1.2f;
       }
       break;
 
     case CRIT_JUMPING:
       critterY += critterVY;
-      critterVY -= 2.0f;
+      critterVY -= 0.3f;  // gravity scaled for 7fps
       if (critterY <= 0) {
         critterY = 0;
         critterVY = 0;
@@ -456,7 +463,7 @@ void updateCritter() {
       break;
 
     case CRIT_WAVING:
-      if (critterStateTicks > 5) {
+      if (critterStateTicks > 35) {  // ~5 seconds
         critterState = CRIT_IDLE;
         critterStateTicks = 0;
       }
@@ -464,7 +471,7 @@ void updateCritter() {
 
     case CRIT_SLEEPING:
       critterVX = 0;
-      if (tilting || random(100) < 2) {
+      if (tilting || random(700) < 2) {
         critterState = CRIT_IDLE;
         critterStateTicks = 0;
         critterIdleTicks = 0;
@@ -472,70 +479,96 @@ void updateCritter() {
       break;
   }
 
-  // Apply velocity and clamp
+  // Apply velocity, wrap around edges (toroidal world)
   critterX += critterVX;
-  critterX = constrain(critterX, 6.0f, 634.0f);
+  if (critterX < -15.0f) {
+    critterX = 655.0f;
+  } else if (critterX > 655.0f) {
+    critterX = -15.0f;
+  }
 }
 
 void drawCritter() {
   int cx = (int)critterX;
-  int cy = SCREEN_H - 10 - (int)critterY;
+  int cy = SCREEN_H - 18 - (int)critterY;
+  int dir = critterDir;  // 1=right, -1=left
   bool sleeping = (critterState == CRIT_SLEEPING);
-  int eyeShift = critterDir;
 
-  // Body
-  gfx->fillCircle(cx, cy, 6, CRITTER_BODY);
-  gfx->fillCircle(cx - 1, cy - 2, 3, CRITTER_HIGHLIGHT);
+  // Body — round torso (radius 11)
+  gfx->fillCircle(cx, cy, 11, CRITTER_BODY);
+  // Belly highlight — lighter circle shifted down
+  gfx->fillCircle(cx, cy + 3, 9, CRITTER_HIGHLIGHT);
 
-  // Eyes
+  // Head — overlapping circle at top-front of body
+  int hx = cx + dir * 8;
+  int hy = cy - 8;
+  if (sleeping) hy = cy - 5;  // head droops when sleeping
+  gfx->fillCircle(hx, hy, 6, CRITTER_BODY);
+
+  // Beak — small orange triangle pointing in walk direction
+  int bx = hx + dir * 6;
+  int by = hy;
+  gfx->fillTriangle(bx, by, bx + dir * 6, by + 1, bx, by + 4, CRITTER_BEAK);
+
+  // Eye — single eye on the visible side
+  int ex = hx + dir * 3;
+  int ey = hy - 1;
   if (sleeping || critterBlink) {
-    gfx->drawFastHLine(cx - 4 + eyeShift, cy - 2, 2, CRITTER_EYE);
-    gfx->drawFastHLine(cx + 2 + eyeShift, cy - 2, 2, CRITTER_EYE);
+    // Closed eye — horizontal line
+    gfx->drawFastHLine(ex - 1, ey, 4, CRITTER_EYE);
   } else {
-    gfx->fillCircle(cx - 3 + eyeShift, cy - 2, 1, CRITTER_EYE);
-    gfx->fillCircle(cx + 3 + eyeShift, cy - 2, 1, CRITTER_EYE);
+    gfx->fillCircle(ex, ey, 1, CRITTER_EYE);
   }
 
-  // Cheeks
-  gfx->drawPixel(cx - 5, cy, CRITTER_CHEEK);
-  gfx->drawPixel(cx + 5, cy, CRITTER_CHEEK);
+  // Cheek blush — small pink spot below eye
+  gfx->fillRect(hx + dir * 1, hy + 3, 3, 3, CRITTER_CHEEK);
 
-  // Mouth
+  // Wing — overlapping circle on body, deeper blue
+  int wx = cx - dir * 3;
+  int wy = cy - 1;
+  if (critterState == CRIT_JUMPING || critterState == CRIT_WAVING) {
+    // Wing raised — shifted up
+    int wingWiggle = ((critterAnimTick / 4) % 2 == 0) ? -3 : 0;
+    gfx->fillCircle(wx, wy - 6 + wingWiggle, 6, CRITTER_WING);
+  } else if (critterState == CRIT_WALKING) {
+    // Wing bobs slightly while walking
+    int wingBob = ((critterAnimTick / 4) % 2 == 0) ? -1 : 0;
+    gfx->fillCircle(wx, wy + wingBob, 6, CRITTER_WING);
+  } else {
+    // Idle/sleeping — wing resting at side
+    gfx->fillCircle(wx, wy, 6, CRITTER_WING);
+  }
+
+  // Tail — triangle at back of body, opposite to direction
+  int tx = cx - dir * 11;
+  int ty = cy - 3;
+  gfx->fillTriangle(tx, ty, tx - dir * 8, ty - 6, tx - dir * 5, ty + 1, CRITTER_WING);
+
+  // Legs — two thin rectangles below body with small feet
   if (critterState == CRIT_JUMPING) {
-    gfx->drawPixel(cx, cy + 3, CRITTER_EYE);  // surprised "o"
-  } else if (sleeping) {
-    gfx->drawFastHLine(cx - 1, cy + 2, 3, CRITTER_EYE);  // flat
+    // Legs tucked up during jump
+    gfx->fillRect(cx - 4, cy + 9, 2, 4, CRITTER_BEAK);
+    gfx->fillRect(cx + 3, cy + 9, 2, 4, CRITTER_BEAK);
   } else {
-    gfx->drawPixel(cx - 1, cy + 2, CRITTER_EYE);  // smile arc
-    gfx->drawPixel(cx, cy + 3, CRITTER_EYE);
-    gfx->drawPixel(cx + 1, cy + 2, CRITTER_EYE);
-  }
-
-  // Feet
-  if (critterState == CRIT_JUMPING) {
-    gfx->fillRect(cx - 3, cy + 5, 2, 2, CRITTER_BODY);
-    gfx->fillRect(cx + 1, cy + 5, 2, 2, CRITTER_BODY);
-  } else {
-    int footOff = (critterState == CRIT_WALKING && critterAnimTick % 2 == 0) ? 1 : 0;
-    gfx->fillRect(cx - 4, cy + 6 - footOff, 2, 2, CRITTER_BODY);
-    gfx->fillRect(cx + 2, cy + 6 + footOff, 2, 2, CRITTER_BODY);
-  }
-
-  // Waving arm
-  if (critterState == CRIT_WAVING) {
-    int armWiggle = (critterAnimTick % 2 == 0) ? -1 : 1;
-    gfx->fillRect(cx + critterDir * 7, cy - 4 + armWiggle, 2, 4, CRITTER_BODY);
+    // Walking: alternate leg positions
+    int legOff = (critterState == CRIT_WALKING && (critterAnimTick / 4) % 2 == 0) ? 2 : 0;
+    // Left leg
+    gfx->fillRect(cx - 4, cy + 10 - legOff, 2, 5, CRITTER_BEAK);
+    gfx->fillRect(cx - 5, cy + 14 - legOff, 4, 1, CRITTER_BEAK);  // foot
+    // Right leg
+    gfx->fillRect(cx + 3, cy + 10 + legOff, 2, 5, CRITTER_BEAK);
+    gfx->fillRect(cx + 1, cy + 14 + legOff, 4, 1, CRITTER_BEAK);  // foot
   }
 
   // Sleeping ZZZ
   if (sleeping) {
-    int zy = cy - 10 - (critterAnimTick % 3) * 3;
+    int zy = hy - 10 - ((critterAnimTick / 7) % 3) * 5;
     gfx->setTextColor(TEXT_SECONDARY);
     gfx->setTextSize(1);
-    gfx->setCursor(cx + 6, zy);
+    gfx->setCursor(hx + 8, zy);
     gfx->print("z");
-    if (critterAnimTick % 6 < 3) {
-      gfx->setCursor(cx + 12, zy - 6);
+    if ((critterAnimTick / 7) % 6 < 3) {
+      gfx->setCursor(hx + 15, zy - 9);
       gfx->print("z");
     }
   }
@@ -833,7 +866,7 @@ void setup() {
 
 #if CRITTER_ENABLED
   if (qmiReady) {
-    Serial.println("[IMU] QMI8658 initialized");
+    Serial.printf("[IMU] QMI8658 initialized (baseline x=%.2f)\n", accelBaseX);
   } else {
     Serial.println("[IMU] QMI8658 not found — critter will use random movement");
   }
@@ -880,6 +913,26 @@ void setup() {
     lastWeatherFetch = millis();
   }
 
+#if CRITTER_ENABLED
+  // Calibrate resting tilt now that device has been sitting still
+  if (qmiReady) {
+    float sum = 0.0f;
+    int samples = 0;
+    for (int i = 0; i < 20; i++) {
+      IMUdata acc, gyro;
+      if (qmi.getDataReady()) {
+        qmi.getAccelerometer(acc.x, acc.y, acc.z);
+        qmi.getGyroscope(gyro.x, gyro.y, gyro.z);
+        sum += acc.x;
+        samples++;
+      }
+      delay(20);
+    }
+    if (samples > 0) accelBaseX = sum / samples;
+    Serial.printf("[IMU] Calibrated baseline x=%.2f (%d samples)\n", accelBaseX, samples);
+  }
+#endif
+
   drawSplash("Ready!");
   delay(400);
 
@@ -892,8 +945,13 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
-  // Update clock display every second
-  if (now - lastClockUpdate >= CLOCK_INTERVAL) {
+  // Redraw display — faster when critter is enabled for smooth animation
+#if CRITTER_ENABLED
+  static const unsigned long drawInterval = 150;  // ~7fps
+#else
+  static const unsigned long drawInterval = CLOCK_INTERVAL;
+#endif
+  if (now - lastClockUpdate >= drawInterval) {
     lastClockUpdate = now;
     drawMainPanel();
   }
