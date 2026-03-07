@@ -103,9 +103,14 @@ struct WeatherData {
   unsigned long sunset;
   int   aqi;          // 1-5 scale from OWM
   float pm2_5;
+  float wind_speed;
+  int   wind_deg;
+  int   clouds;       // cloudiness %
+  int   pressure;     // hPa
+  int   visibility;   // meters
 };
 
-WeatherData weather = { 0, 0, 0, "loading...", "01d", false, 0, 0, 0, 0, 0, 0 };
+WeatherData weather = {};
 
 unsigned long lastWeatherFetch  = 0;
 unsigned long lastClockUpdate   = 0;
@@ -318,10 +323,15 @@ void fetchWeather() {
               sizeof(weather.icon));
       weather.valid = true;
 
-      weather.lat     = doc["coord"]["lat"] | 0.0f;
-      weather.lon     = doc["coord"]["lon"] | 0.0f;
-      weather.sunrise = doc["sys"]["sunrise"] | 0UL;
-      weather.sunset  = doc["sys"]["sunset"]  | 0UL;
+      weather.lat        = doc["coord"]["lat"] | 0.0f;
+      weather.lon        = doc["coord"]["lon"] | 0.0f;
+      weather.sunrise    = doc["sys"]["sunrise"] | 0UL;
+      weather.sunset     = doc["sys"]["sunset"]  | 0UL;
+      weather.wind_speed = doc["wind"]["speed"] | 0.0f;
+      weather.wind_deg   = doc["wind"]["deg"] | 0;
+      weather.clouds     = doc["clouds"]["all"] | 0;
+      weather.pressure   = doc["main"]["pressure"] | 0;
+      weather.visibility = doc["visibility"] | 0;
 
       // Capitalize first letter
       if (weather.description[0] >= 'a' && weather.description[0] <= 'z') {
@@ -762,7 +772,7 @@ void drawSunArc(int panelX, int arcCY) {
       y1 = arcCY + (int)(sinf(a1) * arcH);
       y2 = arcCY + (int)(sinf(a2) * arcH);
     }
-    gfx->drawLine(x1, y1, x2, y2, TEXT_DIM);
+    gfx->drawLine(x1, y1, x2, y2, TEXT_SECONDARY);
   }
 
   // Dot position along arc
@@ -791,7 +801,7 @@ void drawSunArc(int panelX, int arcCY) {
   snprintf(rBuf, sizeof(rBuf), "%d:%02d", rH, riseM);
   snprintf(sBuf, sizeof(sBuf), "%d:%02d", sH, setM);
 
-  gfx->setTextColor(TEXT_DIM);
+  gfx->setTextColor(TEXT_SECONDARY);
   gfx->setTextSize(1);
   gfx->setCursor(arcX, arcCY + 6);
   gfx->print(rBuf);
@@ -904,47 +914,59 @@ void drawDateTile0(int px, int py, int pw, int ph, struct tm* t) {
 
 // ── DATE tile 1: Sun Arc ────────────────────────────────────
 void drawDateTile1(int px, int py, int pw, int ph) {
-  // Sun arc (reusing existing drawSunArc, centered in panel)
-  drawSunArc(px, py + 50);
-
-  // Sunrise/sunset labels at top
-  if (weather.sunrise > 0 && weather.sunset > 0) {
-    long tzOffset = (long)UTC_OFFSET * 3600 + (long)DST_OFFSET * 3600;
-    unsigned long rise = weather.sunrise + tzOffset;
-    unsigned long set  = weather.sunset  + tzOffset;
-
-    int riseH = (rise % 86400) / 3600;
-    int riseM = ((rise % 86400) % 3600) / 60;
-    int setH  = (set % 86400) / 3600;
-    int setM  = ((set % 86400) % 3600) / 60;
-    int rH = riseH % 12; if (rH == 0) rH = 12;
-    int sH = setH % 12;  if (sH == 0) sH = 12;
-
-    gfx->setTextColor(WARN_COLOR);
-    gfx->setTextSize(1);
-    gfx->setCursor(px + 12, py + 12);
-    char buf[24];
-    snprintf(buf, sizeof(buf), "Rise %d:%02d%s", rH, riseM, riseH >= 12 ? "p" : "a");
-    gfx->print(buf);
-
-    gfx->setCursor(px + 12, py + 24);
-    snprintf(buf, sizeof(buf), "Set  %d:%02d%s", sH, setM, setH >= 12 ? "p" : "a");
-    gfx->print(buf);
-
-    // Day length
-    unsigned long dayLen = weather.sunset - weather.sunrise;
-    int dlH = dayLen / 3600;
-    int dlM = (dayLen % 3600) / 60;
-    snprintf(buf, sizeof(buf), "Day: %dh %dm", dlH, dlM);
-    gfx->setTextColor(TEXT_DIM);
-    gfx->setCursor(px + 12, py + 100);
-    gfx->print(buf);
-  } else {
+  if (weather.sunrise == 0 || weather.sunset == 0) {
     gfx->setTextColor(TEXT_DIM);
     gfx->setTextSize(1);
     gfx->setCursor(px + 12, py + 40);
     gfx->print("No sun data");
+    return;
   }
+
+  long tzOffset = (long)UTC_OFFSET * 3600 + (long)DST_OFFSET * 3600;
+  unsigned long rise = weather.sunrise + tzOffset;
+  unsigned long set  = weather.sunset  + tzOffset;
+
+  int riseH = (rise % 86400) / 3600;
+  int riseM = ((rise % 86400) % 3600) / 60;
+  int setH  = (set % 86400) / 3600;
+  int setM  = ((set % 86400) % 3600) / 60;
+  int rH = riseH % 12; if (rH == 0) rH = 12;
+  int sH = setH % 12;  if (sH == 0) sH = 12;
+
+  // Sunrise/sunset times — orange, textSize 2
+  char buf[24];
+  gfx->setTextColor(WARN_COLOR);
+  gfx->setTextSize(2);
+  snprintf(buf, sizeof(buf), "Rise %d:%02d%s", rH, riseM, riseH >= 12 ? "p" : "a");
+  gfx->setCursor(px + 12, py + 10);
+  gfx->print(buf);
+
+  snprintf(buf, sizeof(buf), "Set  %d:%02d%s", sH, setM, setH >= 12 ? "p" : "a");
+  gfx->setCursor(px + 12, py + 32);
+  gfx->print(buf);
+
+  // Sun arc — below the text
+  drawSunArc(px, py + 78);
+
+  // Day + night length — textSize 2
+  unsigned long dayLen = weather.sunset - weather.sunrise;
+  unsigned long nightLen = 86400 - dayLen;
+  int dlH = dayLen / 3600;
+  int dlM = (dayLen % 3600) / 60;
+  int nlH = nightLen / 3600;
+  int nlM = (nightLen % 3600) / 60;
+
+  gfx->setTextColor(WARN_COLOR);
+  gfx->setTextSize(2);
+  snprintf(buf, sizeof(buf), "%dh%dm", dlH, dlM);
+  gfx->setCursor(px + 12, py + 110);
+  gfx->print(buf);
+
+  gfx->setTextColor(TEXT_SECONDARY);
+  snprintf(buf, sizeof(buf), "%dh%dm", nlH, nlM);
+  int nw = strlen(buf) * 12;
+  gfx->setCursor(px + pw - nw - 12, py + 110);
+  gfx->print(buf);
 }
 
 // ── DATE tile 2: Moon Phase ─────────────────────────────────
@@ -1005,26 +1027,99 @@ void drawDateTile2(int px, int py, int pw, int ph, struct tm* t) {
     }
   }
 
-  // Phase name
+  // Phase name — textSize 2
   const char* name = moonPhaseName(age);
-  int nameW = strlen(name) * 6;
+  int nameW = strlen(name) * 12;
   gfx->setTextColor(TEXT_PRIMARY);
-  gfx->setTextSize(1);
-  gfx->setCursor(px + (pw - nameW) / 2, py + 84);
+  gfx->setTextSize(2);
+  gfx->setCursor(px + (pw - nameW) / 2, py + 86);
   gfx->print(name);
 
-  // Illumination percentage
+  // Illumination percentage — textSize 2
   char illBuf[10];
   snprintf(illBuf, sizeof(illBuf), "%.0f%% lit", illum * 100.0f);
-  int illW = strlen(illBuf) * 6;
-  gfx->setTextColor(TEXT_DIM);
-  gfx->setCursor(px + (pw - illW) / 2, py + 98);
+  int illW = strlen(illBuf) * 12;
+  gfx->setTextColor(TEXT_SECONDARY);
+  gfx->setTextSize(2);
+  gfx->setCursor(px + (pw - illW) / 2, py + 108);
   gfx->print(illBuf);
 }
 
-// ── WEATHER tile 0: Temp + Description ──────────────────────
+// ── Weather Icon (drawn with GFX primitives) ───────────────
+void drawWeatherIcon(int cx, int cy, const char* icon) {
+  bool night = (icon[2] == 'n');
+  // Sun / Moon base
+  if (strncmp(icon, "01", 2) == 0) {
+    // Clear sky
+    if (night) {
+      // Moon crescent
+      gfx->fillCircle(cx, cy, 12, gfx->color565(220, 215, 180));
+      gfx->fillCircle(cx + 6, cy - 4, 10, PANEL_COLOR);
+    } else {
+      // Sun
+      gfx->fillCircle(cx, cy, 10, WARN_COLOR);
+      for (int a = 0; a < 8; a++) {
+        float angle = a * PI / 4.0f;
+        int rx = cx + (int)(cosf(angle) * 15);
+        int ry = cy - (int)(sinf(angle) * 15);
+        gfx->fillCircle(rx, ry, 2, WARN_COLOR);
+      }
+    }
+  } else if (strncmp(icon, "02", 2) == 0) {
+    // Few clouds — sun/moon peeking out
+    if (!night) {
+      gfx->fillCircle(cx - 4, cy - 6, 8, WARN_COLOR);
+    } else {
+      gfx->fillCircle(cx - 4, cy - 6, 6, gfx->color565(200, 195, 170));
+    }
+    // Small cloud in front
+    gfx->fillCircle(cx + 2, cy + 2, 8, gfx->color565(180, 180, 195));
+    gfx->fillCircle(cx - 6, cy + 4, 6, gfx->color565(180, 180, 195));
+    gfx->fillCircle(cx + 8, cy + 5, 5, gfx->color565(180, 180, 195));
+  } else if (strncmp(icon, "03", 2) == 0 || strncmp(icon, "04", 2) == 0) {
+    // Clouds
+    gfx->fillCircle(cx, cy - 2, 9, gfx->color565(160, 160, 175));
+    gfx->fillCircle(cx - 8, cy + 3, 7, gfx->color565(150, 150, 165));
+    gfx->fillCircle(cx + 8, cy + 3, 6, gfx->color565(150, 150, 165));
+    gfx->fillRoundRect(cx - 12, cy + 2, 24, 8, 3, gfx->color565(150, 150, 165));
+  } else if (strncmp(icon, "09", 2) == 0 || strncmp(icon, "10", 2) == 0) {
+    // Rain
+    gfx->fillCircle(cx, cy - 4, 8, gfx->color565(130, 130, 150));
+    gfx->fillCircle(cx - 7, cy, 6, gfx->color565(130, 130, 150));
+    gfx->fillCircle(cx + 7, cy, 5, gfx->color565(130, 130, 150));
+    // Raindrops
+    for (int d = -1; d <= 1; d++) {
+      gfx->fillRect(cx + d * 7, cy + 8, 2, 5, ACCENT_COLOR);
+    }
+  } else if (strncmp(icon, "11", 2) == 0) {
+    // Thunderstorm
+    gfx->fillCircle(cx, cy - 4, 8, gfx->color565(100, 100, 120));
+    gfx->fillCircle(cx - 7, cy, 6, gfx->color565(100, 100, 120));
+    gfx->fillCircle(cx + 7, cy, 5, gfx->color565(100, 100, 120));
+    // Lightning bolt
+    gfx->fillTriangle(cx, cy + 6, cx + 4, cy + 6, cx - 2, cy + 14, WARN_COLOR);
+  } else if (strncmp(icon, "13", 2) == 0) {
+    // Snow
+    gfx->fillCircle(cx, cy - 4, 8, gfx->color565(170, 170, 185));
+    // Snowflakes
+    for (int d = -1; d <= 1; d++) {
+      gfx->fillCircle(cx + d * 7, cy + 10, 2, TEXT_PRIMARY);
+    }
+  } else if (strncmp(icon, "50", 2) == 0) {
+    // Fog — horizontal lines
+    for (int l = 0; l < 4; l++) {
+      gfx->drawFastHLine(cx - 12, cy - 6 + l * 5, 24, gfx->color565(150, 150, 165));
+    }
+  }
+}
+
+// ── WEATHER tile 0: Temp + Icon + Description ───────────────
 void drawWeatherTile0(int px, int py, int pw, int ph) {
   if (weather.valid) {
+    // Weather icon — top right area
+    drawWeatherIcon(px + pw - 30, py + 28, weather.icon);
+
+    // Temperature — large
     char tempBuf[10];
     const char* unit = (strcmp(OWM_UNITS, "imperial") == 0) ? "F" : "C";
     snprintf(tempBuf, sizeof(tempBuf), "%.0f\xF8%s", weather.temp, unit);
@@ -1054,9 +1149,9 @@ void drawWeatherTile0(int px, int py, int pw, int ph) {
       gfx->print(&weather.description[split + (weather.description[split] == ' ' ? 1 : 0)]);
     }
 
-    // Feels like + humidity
-    char detailBuf[28];
-    snprintf(detailBuf, sizeof(detailBuf), "Feels %.0f\xF8 | %d%%", weather.feels_like, weather.humidity);
+    // Feels like
+    char detailBuf[20];
+    snprintf(detailBuf, sizeof(detailBuf), "Feels %.0f\xF8%s", weather.feels_like, unit);
     gfx->setTextColor(TEXT_SECONDARY);
     gfx->setTextSize(1);
     gfx->setCursor(px + 12, py + 98);
@@ -1111,7 +1206,20 @@ void drawWeatherTile1(int px, int py, int pw, int ph) {
   }
 }
 
-// ── WEATHER tile 2: Weather Detail ──────────────────────────
+// ── Wind direction label ────────────────────────────────────
+const char* windDir(int deg) {
+  if (deg < 23)  return "N";
+  if (deg < 68)  return "NE";
+  if (deg < 113) return "E";
+  if (deg < 158) return "SE";
+  if (deg < 203) return "S";
+  if (deg < 248) return "SW";
+  if (deg < 293) return "W";
+  if (deg < 338) return "NW";
+  return "N";
+}
+
+// ── WEATHER tile 2: Wind + Conditions ───────────────────────
 void drawWeatherTile2(int px, int py, int pw, int ph) {
   if (!weather.valid) {
     gfx->setTextColor(TEXT_DIM);
@@ -1121,41 +1229,48 @@ void drawWeatherTile2(int px, int py, int pw, int ph) {
     return;
   }
 
+  char buf[24];
+  const char* speedUnit = (strcmp(OWM_UNITS, "imperial") == 0) ? "mph" : "m/s";
+
+  // Wind speed — large
+  gfx->setTextColor(TEXT_PRIMARY);
+  gfx->setTextSize(3);
+  snprintf(buf, sizeof(buf), "%.0f", weather.wind_speed);
+  gfx->setCursor(px + 12, py + 10);
+  gfx->print(buf);
+
   gfx->setTextColor(TEXT_SECONDARY);
   gfx->setTextSize(1);
-  int rowY = py + 12;
-  int rowH = 16;
-
-  char buf[28];
-
-  gfx->setCursor(px + 8, rowY);
-  snprintf(buf, sizeof(buf), "Feels: %.0f\xF8", weather.feels_like);
+  gfx->setCursor(px + 12, py + 36);
+  snprintf(buf, sizeof(buf), "%s %s", speedUnit, windDir(weather.wind_deg));
   gfx->print(buf);
 
-  rowY += rowH;
-  gfx->setCursor(px + 8, rowY);
-  snprintf(buf, sizeof(buf), "Humid: %d%%", weather.humidity);
+  // Humidity
+  gfx->setTextColor(ACCENT_COLOR);
+  gfx->setTextSize(2);
+  gfx->setCursor(px + 12, py + 54);
+  snprintf(buf, sizeof(buf), "%d%% rh", weather.humidity);
   gfx->print(buf);
 
-  rowY += rowH;
-  gfx->setCursor(px + 8, rowY);
-  gfx->print("Sky: ");
-  gfx->print(weatherLabel(weather.icon));
-
-  rowY += rowH;
-  gfx->setCursor(px + 8, rowY);
-  snprintf(buf, sizeof(buf), "Desc: %s", weather.description);
-  buf[22] = '\0';  // truncate for panel width
+  // Pressure
+  gfx->setTextColor(TEXT_SECONDARY);
+  gfx->setTextSize(1);
+  gfx->setCursor(px + 12, py + 80);
+  snprintf(buf, sizeof(buf), "%dhPa", weather.pressure);
   gfx->print(buf);
 
-  rowY += rowH;
-  gfx->setCursor(px + 8, rowY);
-  snprintf(buf, sizeof(buf), "Lat: %.2f", weather.lat);
+  // Visibility
+  gfx->setCursor(px + 12, py + 96);
+  if (weather.visibility >= 1000) {
+    snprintf(buf, sizeof(buf), "Vis: %dkm", weather.visibility / 1000);
+  } else {
+    snprintf(buf, sizeof(buf), "Vis: %dm", weather.visibility);
+  }
   gfx->print(buf);
 
-  rowY += rowH;
-  gfx->setCursor(px + 8, rowY);
-  snprintf(buf, sizeof(buf), "Lon: %.2f", weather.lon);
+  // Clouds
+  gfx->setCursor(px + 12, py + 112);
+  snprintf(buf, sizeof(buf), "Clouds: %d%%", weather.clouds);
   gfx->print(buf);
 }
 
