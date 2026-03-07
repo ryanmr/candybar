@@ -834,9 +834,8 @@ void drawTimeTile0(int px, int py, int pw, int ph, struct tm* t) {
 
 // ── TIME tile 1: World Clocks ───────────────────────────────
 void drawTimeTile1(int px, int py, int pw, int ph) {
-  // Get true UTC epoch: time(nullptr) returns local time on ESP32 after configTime
-  time_t localEpoch = time(nullptr);
-  time_t utcEpoch = localEpoch - (long)UTC_OFFSET * 3600 - (long)DST_OFFSET * 3600;
+  // time(nullptr) returns UTC epoch on ESP32
+  time_t utcEpoch = time(nullptr);
 
   const char* labels[] = { WORLD_CLOCK_1_LABEL, WORLD_CLOCK_2_LABEL, WORLD_CLOCK_3_LABEL };
   const int offsets[] = { WORLD_CLOCK_1_OFFSET, WORLD_CLOCK_2_OFFSET, WORLD_CLOCK_3_OFFSET };
@@ -850,8 +849,8 @@ void drawTimeTile1(int px, int py, int pw, int ph) {
     gfx->setCursor(px + 12, rowY);
     gfx->print(labels[i]);
 
-    // Time
-    time_t clockEpoch = utcEpoch + (long)offsets[i] * 3600;
+    // Time (offsets are in minutes from UTC)
+    time_t clockEpoch = utcEpoch + (long)offsets[i] * 60;
     struct tm ct;
     gmtime_r(&clockEpoch, &ct);
     int h12 = ct.tm_hour % 12;

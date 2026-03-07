@@ -74,6 +74,7 @@
 #endif
 
 // -- World Clocks (Time tile 1) --
+// Offsets are in minutes from UTC (e.g. 330 = UTC+5:30)
 #ifndef WORLD_CLOCK_1_LABEL
 #define WORLD_CLOCK_1_LABEL  "London"
 #endif
@@ -81,14 +82,14 @@
 #define WORLD_CLOCK_1_OFFSET  0
 #endif
 #ifndef WORLD_CLOCK_2_LABEL
-#define WORLD_CLOCK_2_LABEL  "Tokyo"
+#define WORLD_CLOCK_2_LABEL  "India"
 #endif
 #ifndef WORLD_CLOCK_2_OFFSET
-#define WORLD_CLOCK_2_OFFSET  9
+#define WORLD_CLOCK_2_OFFSET  330
 #endif
 #ifndef WORLD_CLOCK_3_LABEL
-#define WORLD_CLOCK_3_LABEL  "Sydney"
+#define WORLD_CLOCK_3_LABEL  "Tokyo"
 #endif
 #ifndef WORLD_CLOCK_3_OFFSET
-#define WORLD_CLOCK_3_OFFSET  11
+#define WORLD_CLOCK_3_OFFSET  540
 #endif
