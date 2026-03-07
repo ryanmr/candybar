@@ -585,6 +585,9 @@ void updateAutoDim() {
 
 // =============================================================
 // Audio — ES8311 codec + I2S click feedback
+// Critical: I2S must start BEFORE ES8311 init (codec needs MCLK
+// running to configure its PLL). Stereo mode required for correct
+// BCLK/LRCK ratio. Register sequence from Waveshare reference.
 // =============================================================
 #if TOUCH_SOUND_ENABLED
 #include <ESP_I2S.h>
@@ -614,103 +617,129 @@ bool es8311Init() {
   es8311WriteReg(0x00, 0x00);
   delay(20);
 
-  // Clock config: MCLK from pin, auto clock gates
-  es8311WriteReg(0x01, 0x30);  // VMIDSEL=1, clock gates on
+  // I2C noise immunity (per Waveshare reference — write twice)
+  es8311WriteReg(0x44, 0x08);
+  es8311WriteReg(0x44, 0x08);
+
+  // -- es8311_open: initial clock + system setup --
+  es8311WriteReg(0x01, 0x30);  // Initial clock config (partial)
   es8311WriteReg(0x02, 0x00);  // MCLK source = from pin
-  es8311WriteReg(0x03, 0x10);  // MCLK pre-divider
-  es8311WriteReg(0x04, 0x10);  // BCLK divider
-  es8311WriteReg(0x05, 0x00);  // CLK ADC/DAC config
-  es8311WriteReg(0x06, 0x01);  // BCLK divider for LRCK
-  es8311WriteReg(0x07, 0x00);  // LRCK high byte
-  es8311WriteReg(0x08, 0xFF);  // LRCK low byte
+  es8311WriteReg(0x03, 0x10);  // ADC OSR
+  es8311WriteReg(0x16, 0x24);  // ADC mic gain
+  es8311WriteReg(0x04, 0x10);  // DAC OSR
+  es8311WriteReg(0x05, 0x00);  // CLK dividers
 
-  // I2S format: standard I2S, 16-bit
-  es8311WriteReg(0x09, 0x0C);  // DAC serial port: I2S 16-bit
-  es8311WriteReg(0x0A, 0x0C);  // ADC serial port: I2S 16-bit
-
-  // System power config
-  es8311WriteReg(0x0B, 0x00);  // System: normal mode
-  es8311WriteReg(0x0C, 0x00);  // System: normal mode
-  es8311WriteReg(0x10, 0x1F);  // Analog power: VREF on, all bias on
+  // System power
+  es8311WriteReg(0x0B, 0x00);  // System normal
+  es8311WriteReg(0x0C, 0x00);  // System normal
+  es8311WriteReg(0x10, 0x1F);  // Analog power: VREF + all bias on
   es8311WriteReg(0x11, 0x7F);  // Analog power: DAC + headphone on
 
-  // GPIO config
-  es8311WriteReg(0x0D, 0x01);
-  es8311WriteReg(0x0E, 0x02);
-  es8311WriteReg(0x0F, 0x44);
+  // Power on in slave mode
+  es8311WriteReg(0x00, 0x80);
+  delay(10);
 
-  // ADC config (not used but set to known state)
-  es8311WriteReg(0x12, 0x00);  // ADC: unmute
-  es8311WriteReg(0x13, 0x00);
-  es8311WriteReg(0x14, 0x1A);  // ADC volume
+  // Enable ALL clocks (0x3F, not 0x30) — includes DAC clock domain
+  es8311WriteReg(0x01, 0x3F);
 
-  // DAC config
-  es8311WriteReg(0x15, 0x00);  // DAC: soft volume on
-  es8311WriteReg(0x16, 0x24);  // DAC config
-  es8311WriteReg(0x17, 0x08);  // DAC automute config
-  es8311WriteReg(0x18, 0x00);
-  es8311WriteReg(0x19, 0x00);
-  es8311WriteReg(0x1A, 0x00);
-  es8311WriteReg(0x1B, 0x0A);  // DAC ramp rate
-  es8311WriteReg(0x1C, 0x6A);  // DAC low power mode
+  // HP driver + system config
+  es8311WriteReg(0x13, 0x10);  // HP driver enable
+  es8311WriteReg(0x1B, 0x0A);  // ADC HPF
+  es8311WriteReg(0x1C, 0x6A);  // ADC EQ
 
-  // DAC volume — register 0x32 is the actual volume control
+  // Internal DAC reference
+  es8311WriteReg(0x44, 0x58);
+
+  // -- Clock coefficients for 16kHz, MCLK=256*16000=4,096,000 --
+  // From ES8311 coefficient table: {4096000, 16000, ...}
+  es8311WriteReg(0x02, 0x00);  // pre_div=1, pre_mult=0
+  es8311WriteReg(0x05, 0x00);  // adc_div=1, dac_div=1
+  es8311WriteReg(0x03, 0x10);  // fs_mode=0, adc_osr=0x10
+  es8311WriteReg(0x04, 0x20);  // dac_osr=0x20
+  es8311WriteReg(0x07, 0x00);  // LRCK high
+  es8311WriteReg(0x08, 0xFF);  // LRCK low
+  es8311WriteReg(0x06, 0x03);  // BCLK divider
+
+  // I2S format: standard I2S (Philips), 16-bit, SDP enabled (bit 6 = 0)
+  es8311WriteReg(0x09, 0x0C);  // DAC SDP: I2S 16-bit, not tri-stated
+  es8311WriteReg(0x0A, 0x0C);  // ADC SDP: I2S 16-bit
+
+  // -- es8311_start: activate the DAC output path --
+  es8311WriteReg(0x00, 0x80);  // Power on, slave mode
+  es8311WriteReg(0x01, 0x3F);  // All clocks enabled
+
+  es8311WriteReg(0x17, 0xBF);  // ADC volume (needed even for DAC mode)
+  es8311WriteReg(0x0E, 0x02);  // Power up PGA + ADC analog
+  es8311WriteReg(0x12, 0x00);  // Enable DAC
+  es8311WriteReg(0x14, 0x1A);  // Analog PGA gain
+  es8311WriteReg(0x0D, 0x01);  // Power up system
+  es8311WriteReg(0x15, 0x40);  // ADC ramp rate
+  es8311WriteReg(0x37, 0x08);  // DAC ramp rate
+  es8311WriteReg(0x45, 0x00);  // GP control
+
+  // DAC volume
   es8311WriteReg(0x32, 0xBF);  // ~75% volume
 
-  // Mixer: DAC to output, no ADC mix
-  es8311WriteReg(0x37, 0x08);
-
-  // Power up — start oscillator + DAC
-  es8311WriteReg(0x00, 0x80);
   delay(50);
-
   Serial.println("[Audio] ES8311 initialized");
   return true;
 }
 
 void audioSetup() {
-  // Init ES8311 codec first (before enabling PA to avoid pop)
-  if (!es8311Init()) return;
-
-  // Enable speaker amplifier via TCA9554 pin 7
-  tca9554SetPin(TCA9554_PA_EN, true);
-  delay(10);
-
-  // Start I2S — 8kHz mono 16-bit
+  // Step 1: Start I2S FIRST — ES8311 needs MCLK running to configure PLL
   i2sOut.setPins(I2S_BCLK, I2S_LRCK, I2S_SDOUT, I2S_SDIN, I2S_MCLK);
-  if (!i2sOut.begin(I2S_MODE_STD, 8000, I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO)) {
+  if (!i2sOut.begin(I2S_MODE_STD, 16000, I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO)) {
     Serial.println("[Audio] I2S begin failed");
     return;
   }
+  Serial.println("[Audio] I2S started (16kHz stereo)");
+  delay(50);  // Let MCLK stabilize
+
+  // Step 2: Init ES8311 codec (now that MCLK is running)
+  if (!es8311Init()) return;
+
+  // Step 3: Enable speaker amplifier via TCA9554 pin 7 (after codec to avoid pop)
+  tca9554SetPin(TCA9554_PA_EN, true);
+  delay(10);
+
+  // Pre-compute the click waveform
+  generateClick();
 
   audioReady = true;
-  Serial.println("[Audio] I2S started, audio ready");
+  Serial.println("[Audio] Audio ready");
+}
+
+// Click waveform buffer — filled once at startup
+#define CLICK_FRAMES 48
+#define CLICK_PAD    16
+#define CLICK_TOTAL  (CLICK_FRAMES + CLICK_PAD)
+static int16_t clickBuf[CLICK_TOTAL * 2];  // stereo pairs
+
+void generateClick() {
+  // Soft sine "tick": 1200Hz tone with fast exponential decay (~3ms)
+  const float freq = 1200.0f;
+  const float rate = 16000.0f;
+  const float amp  = 14000.0f;
+  const float decay = 9.0f;
+
+  for (int i = 0; i < CLICK_FRAMES; i++) {
+    float t = (float)i / (float)CLICK_FRAMES;
+    float angle = 2.0f * PI * freq * (float)i / rate;
+    float envelope = expf(-decay * t);
+    int16_t s = (int16_t)(amp * sinf(angle) * envelope);
+    clickBuf[i * 2]     = s;  // L
+    clickBuf[i * 2 + 1] = s;  // R
+  }
+  // Silence pad to flush DMA
+  for (int i = CLICK_FRAMES; i < CLICK_TOTAL; i++) {
+    clickBuf[i * 2]     = 0;
+    clickBuf[i * 2 + 1] = 0;
+  }
 }
 
 void playClick() {
   if (!audioReady) return;
-
-  // 64-sample click at 8kHz (~8ms): loud decaying square wave + silence pad
-  // Larger buffer ensures I2S DMA actually flushes to the codec
-  static const int16_t click[64] = {
-    // Sharp attack — full amplitude square wave
-     30000, -30000,  30000, -30000,
-     28000, -28000,  28000, -28000,
-    // Decay
-     24000, -24000,  20000, -20000,
-     16000, -16000,  12000, -12000,
-     10000, -10000,   8000,  -8000,
-      6000,  -6000,   4000,  -4000,
-      3000,  -3000,   2000,  -2000,
-      1000,  -1000,    500,   -500,
-    // Silence pad (32 samples) to flush DMA
-     0, 0, 0, 0, 0, 0, 0, 0,
-     0, 0, 0, 0, 0, 0, 0, 0,
-     0, 0, 0, 0, 0, 0, 0, 0,
-     0, 0, 0, 0, 0, 0, 0, 0
-  };
-
-  i2sOut.write((uint8_t*)click, sizeof(click));
+  i2sOut.write((uint8_t*)clickBuf, sizeof(clickBuf));
 }
 #endif // TOUCH_SOUND_ENABLED
 
