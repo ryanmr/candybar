@@ -67,3 +67,28 @@
 #ifndef TOUCH_DEBOUNCE
 #define TOUCH_DEBOUNCE    (300)              // touch debounce ms
 #endif
+
+// -- Navigation --
+#ifndef AUTO_RETURN_MIN
+#define AUTO_RETURN_MIN   5       // minutes before auto-return to home (0 = disabled)
+#endif
+
+// -- World Clocks (Time tile 1) --
+#ifndef WORLD_CLOCK_1_LABEL
+#define WORLD_CLOCK_1_LABEL  "London"
+#endif
+#ifndef WORLD_CLOCK_1_OFFSET
+#define WORLD_CLOCK_1_OFFSET  0
+#endif
+#ifndef WORLD_CLOCK_2_LABEL
+#define WORLD_CLOCK_2_LABEL  "Tokyo"
+#endif
+#ifndef WORLD_CLOCK_2_OFFSET
+#define WORLD_CLOCK_2_OFFSET  9
+#endif
+#ifndef WORLD_CLOCK_3_LABEL
+#define WORLD_CLOCK_3_LABEL  "Sydney"
+#endif
+#ifndef WORLD_CLOCK_3_OFFSET
+#define WORLD_CLOCK_3_OFFSET  11
+#endif
