@@ -8,13 +8,17 @@ Candybar is an Arduino/ESP32 project — a WiFi-connected always-on desk HUD for
 
 ## Build & Upload
 
-This is an Arduino IDE project, not a standard build-system project. There are no CLI build/test/lint commands.
+Uses `arduino-cli` via the project `Makefile`. **Do not suggest using the Arduino IDE — always use the Makefile.**
 
-- **IDE**: Arduino IDE 2.x
+- **`make build`** — Compile the sketch
+- **`make upload`** — Compile and upload to the board (auto-detects USB port)
+- **`make monitor`** — Open serial monitor (115200 baud)
+- **`make clean`** — Remove build artifacts
 - **Board**: ESP32S3 Dev Module (via Espressif ESP32 board package)
-- **Required board settings**: Flash 16MB, OPI PSRAM, USB CDC On Boot enabled, Default 4MB with spiffs partition
-- **Required libraries** (Arduino Library Manager): `GFX Library for Arduino` (moononournation), `ArduinoJson` (Benoit Blanchon)
-- **Upload**: USB-C; if upload fails, hold BOOT → press RESET → release BOOT → retry
+- **Required board settings** (encoded in Makefile FQBN): Flash 16MB, OPI PSRAM, USB CDC On Boot enabled
+- **Required libraries**: `GFX Library for Arduino` (moononournation), `ArduinoJson` (Benoit Blanchon), `SensorLib` (Lewis He)
+- **Secrets**: Loaded from `.env.local` (injected as build flags via Makefile)
+- **Upload troubleshooting**: USB-C; if upload fails, hold BOOT → press RESET → release BOOT → retry
 
 ## Architecture
 
