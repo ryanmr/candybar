@@ -710,8 +710,11 @@ void audioSetup() {
 }
 
 // Click waveform buffer — filled once at startup
+// 48 frames of tone + 208 frames of silence = 256 total (~16ms at 16kHz)
+// Large silence pad ensures the full DMA buffer is flushed to a clean
+// state after every click, preventing variance between taps.
 #define CLICK_FRAMES 48
-#define CLICK_PAD    16
+#define CLICK_PAD    208
 #define CLICK_TOTAL  (CLICK_FRAMES + CLICK_PAD)
 static int16_t clickBuf[CLICK_TOTAL * 2];  // stereo pairs
 
@@ -730,7 +733,7 @@ void generateClick() {
     clickBuf[i * 2]     = s;  // L
     clickBuf[i * 2 + 1] = s;  // R
   }
-  // Silence pad to flush DMA
+  // Silence pad to flush DMA pipeline
   for (int i = CLICK_FRAMES; i < CLICK_TOTAL; i++) {
     clickBuf[i * 2]     = 0;
     clickBuf[i * 2 + 1] = 0;
@@ -740,6 +743,81 @@ void generateClick() {
 void playClick() {
   if (!audioReady) return;
   i2sOut.write((uint8_t*)clickBuf, sizeof(clickBuf));
+}
+
+// Startup tune — warm ascending arpeggio (~1s)
+// Heap-allocated, generated once, played, then freed.
+#define TUNE_RATE    16000
+#define TUNE_MS      1100
+#define TUNE_FRAMES  (TUNE_RATE * TUNE_MS / 1000)   // 17600
+#define TUNE_PAD     256
+#define TUNE_TOTAL   (TUNE_FRAMES + TUNE_PAD)
+
+struct TuneNote {
+  float freq;       // Hz
+  int   startFrame; // when this note begins
+  int   frames;     // how long it lasts
+  float amplitude;
+  int   attackFrames;
+  float decayRate;  // exponential decay steepness
+};
+
+void playStartupTune() {
+  if (!audioReady) return;
+
+  int16_t* buf = (int16_t*)ps_malloc(TUNE_TOTAL * 4);  // stereo 16-bit
+  if (!buf) {
+    Serial.println("[Audio] Tune alloc failed");
+    return;
+  }
+  memset(buf, 0, TUNE_TOTAL * 4);
+
+  // D major arpeggio — overlapping notes create a warm cascading chime
+  //                freq      start   dur    amp   atk  decay
+  TuneNote notes[] = {
+    {  587.33f,       0, 5600, 3500.0f, 240, 3.5f },  // D5  0–350ms
+    {  739.99f,    2880, 5600, 3500.0f, 240, 3.5f },  // F#5 180–530ms
+    {  880.00f,    5760, 5600, 3500.0f, 240, 3.5f },  // A5  360–710ms
+    { 1174.66f,    8640, 8000, 3800.0f, 320, 2.5f },  // D6  540–1040ms (lingers)
+  };
+  const int numNotes = 4;
+
+  for (int n = 0; n < numNotes; n++) {
+    TuneNote &note = notes[n];
+    for (int i = 0; i < note.frames; i++) {
+      int frame = note.startFrame + i;
+      if (frame >= TUNE_FRAMES) break;
+
+      float angle = 2.0f * PI * note.freq * (float)i / (float)TUNE_RATE;
+
+      // Envelope: smooth attack then exponential decay
+      float env;
+      if (i < note.attackFrames) {
+        env = (float)i / (float)note.attackFrames;
+      } else {
+        float dt = (float)(i - note.attackFrames) / (float)(note.frames - note.attackFrames);
+        env = expf(-note.decayRate * dt);
+      }
+
+      // Bell-like timbre: fundamental + 2nd and 3rd harmonics
+      float tone = sinf(angle)
+                 + sinf(angle * 2.0f) * 0.3f
+                 + sinf(angle * 3.0f) * 0.08f;
+      int16_t s = (int16_t)(note.amplitude * tone * env / 1.38f);
+
+      // Mix (add) so overlapping notes blend
+      int32_t L = (int32_t)buf[frame * 2]     + s;
+      int32_t R = (int32_t)buf[frame * 2 + 1] + s;
+      if (L >  32767) L =  32767; if (L < -32768) L = -32768;
+      if (R >  32767) R =  32767; if (R < -32768) R = -32768;
+      buf[frame * 2]     = (int16_t)L;
+      buf[frame * 2 + 1] = (int16_t)R;
+    }
+  }
+
+  i2sOut.write((uint8_t*)buf, TUNE_TOTAL * 4);
+  free(buf);
+  Serial.println("[Audio] Startup tune played");
 }
 #endif // TOUCH_SOUND_ENABLED
 
@@ -2030,6 +2108,7 @@ void setup() {
 #if TOUCH_SOUND_ENABLED
   drawSplash("Setting up audio...");
   audioSetup();
+  playStartupTune();
 #endif
 
   drawSplash("Ready!");
