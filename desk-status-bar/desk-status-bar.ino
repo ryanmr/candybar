@@ -119,10 +119,20 @@ unsigned long pwrBtnDownAt = 0;  // millis when power button was first pressed
 bool pwrBtnWasDown = false;
 bool pwrBtnReady   = false;     // true once we've seen a LOW reading (button released)
 
-// -- IMU (QMI8658 accelerometer for critter tilt) --
+// -- IMU (QMI8658 accelerometer — used for critter tilt + auto-dim) --
 SensorQMI8658 qmi;
 bool qmiReady = false;
+float lastAccX = 0.0f, lastAccY = 0.0f, lastAccZ = 0.0f;
+bool  accelFresh = false;
+#if CRITTER_ENABLED
 float accelBaseX = 0.0f;       // resting tilt offset (calibrated at boot)
+#endif
+
+// -- Auto-dim state --
+unsigned long lastMotionTime = 0;
+float prevAccX = 0.0f, prevAccY = 0.0f, prevAccZ = 0.0f;
+bool  backlightDimmed = false;
+uint8_t currentBrightness = BRIGHTNESS;
 
 // -- Critter pet state --
 enum CritterState { CRIT_IDLE, CRIT_WALKING, CRIT_JUMPING, CRIT_WAVING, CRIT_SLEEPING };
@@ -206,7 +216,7 @@ void powerOff() {
   delay(500);
 
   // Turn off backlight
-  digitalWrite(LCD_BL_PIN, HIGH);
+  setBacklight(0);
 
   // Release power latch — board will lose power
   tca9554SetPin(TCA9554_PWR_PIN, false);
@@ -404,6 +414,64 @@ int getBatteryPercent(float voltage) {
 }
 
 // =============================================================
+// IMU Reading — shared between critter and auto-dim
+// =============================================================
+void readIMU() {
+  accelFresh = false;
+  if (!qmiReady) return;
+  if (qmi.getDataReady()) {
+    IMUdata acc, gyro;
+    if (qmi.getAccelerometer(acc.x, acc.y, acc.z)) {
+      lastAccX = acc.x;
+      lastAccY = acc.y;
+      lastAccZ = acc.z;
+      accelFresh = true;
+    }
+    qmi.getGyroscope(gyro.x, gyro.y, gyro.z); // must read both
+  }
+}
+
+// =============================================================
+// Backlight Control (PWM, active-low)
+// =============================================================
+void setBacklight(uint8_t brightness) {
+  currentBrightness = brightness;
+  // Active-low: 0 = full on, 255 = off
+  ledcWrite(LCD_BL_PIN, 255 - brightness);
+}
+
+void updateAutoDim() {
+  if (!qmiReady) return;
+  unsigned long now = millis();
+
+  // Check for motion: delta against previous reading
+  float dx = lastAccX - prevAccX;
+  float dy = lastAccY - prevAccY;
+  float dz = lastAccZ - prevAccZ;
+  float delta = sqrtf(dx*dx + dy*dy + dz*dz);
+  prevAccX = lastAccX;
+  prevAccY = lastAccY;
+  prevAccZ = lastAccZ;
+
+  if (delta > 0.15f) {
+    lastMotionTime = now;
+    if (backlightDimmed) {
+      backlightDimmed = false;
+      setBacklight(BRIGHTNESS);
+      Serial.println("[Dim] Motion detected, restoring brightness");
+    }
+  }
+
+  // Dim after timeout
+  unsigned long dimTimeoutMs = (unsigned long)DIM_TIMEOUT_MIN * 60UL * 1000UL;
+  if (!backlightDimmed && (now - lastMotionTime >= dimTimeoutMs)) {
+    backlightDimmed = true;
+    setBacklight(DIM_BRIGHTNESS);
+    Serial.println("[Dim] No motion, dimming backlight");
+  }
+}
+
+// =============================================================
 // Drawing Helpers
 // =============================================================
 
@@ -438,18 +506,8 @@ const char* weatherLabel(const char* icon) {
 void updateCritter() {
   critterAnimTick++;
 
-  // Read accelerometer tilt
-  float tiltX = 0.0f;
-  if (qmiReady) {
-    IMUdata acc;
-    IMUdata gyro;
-    if (qmi.getDataReady()) {
-      if (qmi.getAccelerometer(acc.x, acc.y, acc.z)) {
-        tiltX = acc.x - accelBaseX;
-      }
-      qmi.getGyroscope(gyro.x, gyro.y, gyro.z); // must read both
-    }
-  }
+  // Use shared IMU data (read by readIMU() in loop)
+  float tiltX = qmiReady ? (lastAccX - accelBaseX) : 0.0f;
 
   // Log accel every ~10 seconds (70 ticks at 7fps)
   if (qmiReady && critterAnimTick % 70 == 0) {
@@ -1005,8 +1063,7 @@ void setup() {
   latchPowerOn();
   sampleBatteryOnce(); // Initial battery read at boot
 
-#if CRITTER_ENABLED
-  // Init IMU (QMI8658 accelerometer for critter tilt detection)
+  // Init IMU (QMI8658 — used for auto-dim motion detection + critter tilt)
   qmiReady = qmi.begin(Wire1, QMI8658_ADDR, I2C_SDA, I2C_SCL);
   if (qmiReady) {
     qmi.configAccelerometer(SensorQMI8658::ACC_RANGE_4G, SensorQMI8658::ACC_ODR_62_5Hz);
@@ -1014,7 +1071,6 @@ void setup() {
     qmi.enableAccelerometer();
     qmi.enableGyroscope();
   }
-#endif
 
   Serial.begin(115200);
   delay(300);
@@ -1022,13 +1078,11 @@ void setup() {
   Serial.println("  Desk Status Bar — Booting");
   Serial.println("=============================\n");
 
-#if CRITTER_ENABLED
   if (qmiReady) {
-    Serial.printf("[IMU] QMI8658 initialized (baseline x=%.2f)\n", accelBaseX);
+    Serial.println("[IMU] QMI8658 initialized");
   } else {
-    Serial.println("[IMU] QMI8658 not found — critter will use random movement");
+    Serial.println("[IMU] QMI8658 not found — auto-dim disabled");
   }
-#endif
 
   // Power button read pin (GPIO 16) — HIGH when pressed
   // INPUT_PULLDOWN ensures it reads LOW when not pressed
@@ -1045,10 +1099,11 @@ void setup() {
   // Canvas buffer stays portrait (172x640) so flush works with QSPI
   gfx->setRotation(ROTATION);
 
-  // Backlight on (active-low: LOW = full brightness)
-  pinMode(LCD_BL_PIN, OUTPUT);
-  digitalWrite(LCD_BL_PIN, LOW);
-  Serial.println("[Backlight] On");
+  // Backlight on via PWM (active-low: 255 = off, 0 = full on)
+  ledcAttach(LCD_BL_PIN, 5000, 8);
+  setBacklight(BRIGHTNESS);
+  lastMotionTime = millis();
+  Serial.println("[Backlight] On (PWM)");
 
   // Splash
   drawSplash("Connecting to WiFi...");
@@ -1104,6 +1159,10 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
+  // Read IMU + update auto-dim (before draw so motion restores brightness immediately)
+  readIMU();
+  updateAutoDim();
+
   // Redraw display — faster when critter is enabled for smooth animation
 #if CRITTER_ENABLED
   static const unsigned long drawInterval = 150;  // ~7fps
@@ -1149,6 +1208,7 @@ void loop() {
     if (pwrDown && !pwrBtnWasDown) {
       pwrBtnDownAt = now;
       pwrBtnWasDown = true;
+      lastMotionTime = now;
     } else if (!pwrDown) {
       pwrBtnWasDown = false;
     } else if (pwrDown && pwrBtnWasDown && (now - pwrBtnDownAt >= 3000)) {
@@ -1160,6 +1220,7 @@ void loop() {
   TouchPoint tp = readTouch();
   if (tp.pressed && (now - lastTouchTime > TOUCH_DEBOUNCE)) {
     lastTouchTime = now;
+    lastMotionTime = now;
     Serial.printf("[Touch] x=%d y=%d\n", tp.x, tp.y);
 
     // Tap anywhere → force weather refresh

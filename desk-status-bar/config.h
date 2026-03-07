@@ -49,6 +49,14 @@
 #define CRITTER_ENABLED  1          // 1=show critter, 0=disable
 #endif
 
+// -- Auto-Dim --
+#ifndef DIM_TIMEOUT_MIN
+#define DIM_TIMEOUT_MIN  5        // minutes of no motion before dimming
+#endif
+#ifndef DIM_BRIGHTNESS
+#define DIM_BRIGHTNESS   25       // ~10% brightness when dimmed
+#endif
+
 // -- Update Intervals (milliseconds) --
 #ifndef WEATHER_INTERVAL
 #define WEATHER_INTERVAL  (10 * 60 * 1000)  // 10 minutes
