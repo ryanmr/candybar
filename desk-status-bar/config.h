@@ -49,6 +49,14 @@
 #define CRITTER_ENABLED  1          // 1=show critter, 0=disable
 #endif
 
+// -- Auto-Dim --
+#ifndef DIM_TIMEOUT_MIN
+#define DIM_TIMEOUT_MIN  5        // minutes of no motion before dimming
+#endif
+#ifndef DIM_BRIGHTNESS
+#define DIM_BRIGHTNESS   25       // ~10% brightness when dimmed
+#endif
+
 // -- Update Intervals (milliseconds) --
 #ifndef WEATHER_INTERVAL
 #define WEATHER_INTERVAL  (10 * 60 * 1000)  // 10 minutes
@@ -58,4 +66,30 @@
 #endif
 #ifndef TOUCH_DEBOUNCE
 #define TOUCH_DEBOUNCE    (300)              // touch debounce ms
+#endif
+
+// -- Navigation --
+#ifndef AUTO_RETURN_MIN
+#define AUTO_RETURN_MIN   5       // minutes before auto-return to home (0 = disabled)
+#endif
+
+// -- World Clocks (Time tile 1) --
+// Offsets are in minutes from UTC (e.g. 330 = UTC+5:30)
+#ifndef WORLD_CLOCK_1_LABEL
+#define WORLD_CLOCK_1_LABEL  "London"
+#endif
+#ifndef WORLD_CLOCK_1_OFFSET
+#define WORLD_CLOCK_1_OFFSET  0
+#endif
+#ifndef WORLD_CLOCK_2_LABEL
+#define WORLD_CLOCK_2_LABEL  "India"
+#endif
+#ifndef WORLD_CLOCK_2_OFFSET
+#define WORLD_CLOCK_2_OFFSET  330
+#endif
+#ifndef WORLD_CLOCK_3_LABEL
+#define WORLD_CLOCK_3_LABEL  "Tokyo"
+#endif
+#ifndef WORLD_CLOCK_3_OFFSET
+#define WORLD_CLOCK_3_OFFSET  540
 #endif

@@ -80,10 +80,12 @@ Arduino_Canvas *gfx = new Arduino_Canvas(LCD_WIDTH, LCD_HEIGHT, display);
 #define WARN_COLOR     gfx->color565(255, 180, 60)    // amber
 #define ERR_COLOR      gfx->color565(255, 80, 80)     // red
 #define DIVIDER_COLOR  gfx->color565(50, 50, 65)      // subtle line
-#define CRITTER_BODY      gfx->color565(120, 200, 160)  // soft mint green
-#define CRITTER_HIGHLIGHT gfx->color565(160, 230, 190)  // lighter mint
-#define CRITTER_EYE       gfx->color565(240, 240, 250)  // near-white
+#define CRITTER_BODY      gfx->color565(130, 185, 230)  // soft sky blue
+#define CRITTER_HIGHLIGHT gfx->color565(180, 215, 245)  // lighter blue belly
+#define CRITTER_EYE       gfx->color565(30, 30, 40)     // near-black
 #define CRITTER_CHEEK     gfx->color565(255, 160, 160)  // pink blush
+#define CRITTER_BEAK      gfx->color565(240, 180, 70)   // warm orange
+#define CRITTER_WING      gfx->color565(100, 155, 210)  // deeper blue
 
 // =============================================================
 // State
@@ -95,14 +97,40 @@ struct WeatherData {
   char  description[32];
   char  icon[8];
   bool  valid;
+  float lat;
+  float lon;
+  unsigned long sunrise;
+  unsigned long sunset;
+  int   aqi;          // 1-5 scale from OWM
+  float pm2_5;
+  float wind_speed;
+  int   wind_deg;
+  int   clouds;       // cloudiness %
+  int   pressure;     // hPa
+  int   visibility;   // meters
 };
 
-WeatherData weather = { 0, 0, 0, "loading...", "01d", false };
+WeatherData weather = {};
 
-unsigned long lastWeatherFetch = 0;
-unsigned long lastClockUpdate  = 0;
-unsigned long lastTouchTime    = 0;
-int  currentPanel = 0;   // 0 = main, 1 = detail, 2 = system info
+unsigned long lastWeatherFetch  = 0;
+unsigned long lastClockUpdate   = 0;
+unsigned long lastTouchTime     = 0;
+unsigned long lastBatteryRead   = 0;
+// Navigation — tile-per-column + page switching
+#define NUM_COLUMNS  4
+#define NUM_PAGES    2
+
+struct ColGeom { int16_t x; int16_t w; uint8_t numTiles; };
+static const ColGeom COL_GEOM[NUM_COLUMNS] = {
+  {   8, 170, 2 },  // Time:    tile 0=clock, tile 1=world clocks
+  { 186, 176, 3 },  // Date:    tile 0=date, tile 1=sun arc, tile 2=moon phase
+  { 370, 156, 3 },  // Weather: tile 0=temp/desc, tile 1=AQI, tile 2=weather detail
+  { 534,  98, 2 },  // Status:  tile 0=wifi/bat, tile 1=system info
+};
+
+uint8_t currentTile[NUM_COLUMNS] = {0};
+uint8_t currentPage = 0;
+unsigned long lastNavTime = 0;
 bool wifiConnected = false;
 bool timeSynced    = false;
 bool onBattery     = false;    // true if booted from power button (battery)
@@ -110,9 +138,20 @@ unsigned long pwrBtnDownAt = 0;  // millis when power button was first pressed
 bool pwrBtnWasDown = false;
 bool pwrBtnReady   = false;     // true once we've seen a LOW reading (button released)
 
-// -- IMU (QMI8658 accelerometer for critter tilt) --
+// -- IMU (QMI8658 accelerometer — used for critter tilt + auto-dim) --
 SensorQMI8658 qmi;
 bool qmiReady = false;
+float lastAccX = 0.0f, lastAccY = 0.0f, lastAccZ = 0.0f;
+bool  accelFresh = false;
+#if CRITTER_ENABLED
+float accelBaseX = 0.0f;       // resting tilt offset (calibrated at boot)
+#endif
+
+// -- Auto-dim state --
+unsigned long lastMotionTime = 0;
+float prevAccX = 0.0f, prevAccY = 0.0f, prevAccZ = 0.0f;
+bool  backlightDimmed = false;
+uint8_t currentBrightness = BRIGHTNESS;
 
 // -- Critter pet state --
 enum CritterState { CRIT_IDLE, CRIT_WALKING, CRIT_JUMPING, CRIT_WAVING, CRIT_SLEEPING };
@@ -127,6 +166,9 @@ int critterIdleTicks = 0;
 int critterStateTicks = 0;
 unsigned long critterBlinkTime = 0;
 bool critterBlink = false;
+unsigned long critterEdgeTime = 0;  // when critter first entered edge zone
+bool critterInEdge = false;
+int critterDirTicks = 0;           // ticks spent walking in current direction
 
 struct TouchPoint {
   int16_t x;
@@ -194,7 +236,7 @@ void powerOff() {
   delay(500);
 
   // Turn off backlight
-  digitalWrite(LCD_BL_PIN, HIGH);
+  setBacklight(0);
 
   // Release power latch — board will lose power
   tca9554SetPin(TCA9554_PWR_PIN, false);
@@ -282,6 +324,16 @@ void fetchWeather() {
               sizeof(weather.icon));
       weather.valid = true;
 
+      weather.lat        = doc["coord"]["lat"] | 0.0f;
+      weather.lon        = doc["coord"]["lon"] | 0.0f;
+      weather.sunrise    = doc["sys"]["sunrise"] | 0UL;
+      weather.sunset     = doc["sys"]["sunset"]  | 0UL;
+      weather.wind_speed = doc["wind"]["speed"] | 0.0f;
+      weather.wind_deg   = doc["wind"]["deg"] | 0;
+      weather.clouds     = doc["clouds"]["all"] | 0;
+      weather.pressure   = doc["main"]["pressure"] | 0;
+      weather.visibility = doc["visibility"] | 0;
+
       // Capitalize first letter
       if (weather.description[0] >= 'a' && weather.description[0] <= 'z') {
         weather.description[0] -= 32;
@@ -299,17 +351,72 @@ void fetchWeather() {
 }
 
 // =============================================================
+// AQI (Air Quality Index)
+// =============================================================
+const char* aqiLabel(int aqi) {
+  switch (aqi) {
+    case 1: return "Good";
+    case 2: return "Fair";
+    case 3: return "Moderate";
+    case 4: return "Poor";
+    case 5: return "V.Poor";
+    default: return "??";
+  }
+}
+
+uint16_t aqiColor(int aqi) {
+  switch (aqi) {
+    case 1: return GOOD_COLOR;
+    case 2: return GOOD_COLOR;
+    case 3: return WARN_COLOR;
+    case 4: return ERR_COLOR;
+    case 5: return ERR_COLOR;
+    default: return TEXT_DIM;
+  }
+}
+
+void fetchAQI() {
+  if (!wifiConnected || weather.lat == 0.0f) return;
+
+  char url[160];
+  snprintf(url, sizeof(url),
+    "http://api.openweathermap.org/data/2.5/air_pollution?lat=%.4f&lon=%.4f&appid=%s",
+    weather.lat, weather.lon, OWM_API_KEY);
+
+  HTTPClient http;
+  http.begin(url);
+  http.setTimeout(10000);
+  int code = http.GET();
+
+  if (code == 200) {
+    String payload = http.getString();
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, payload);
+
+    if (!err) {
+      weather.aqi   = doc["list"][0]["main"]["aqi"] | 0;
+      weather.pm2_5 = doc["list"][0]["components"]["pm2_5"] | 0.0f;
+      Serial.printf("[AQI] %d (%s), PM2.5: %.1f\n", weather.aqi, aqiLabel(weather.aqi), weather.pm2_5);
+    } else {
+      Serial.printf("[AQI] JSON parse error: %s\n", err.c_str());
+    }
+  } else {
+    Serial.printf("[AQI] HTTP error: %d\n", code);
+  }
+
+  http.end();
+}
+
+// =============================================================
 // Battery Voltage
-// Read ADC ONCE at boot before display init, then never again.
-// ADC1 conflicts with QSPI display pins, so we sample early
-// and cache the result. Updated only on reboot.
+// Sampled at boot and refreshed every 60 seconds in loop().
 // =============================================================
 float cachedBatteryVoltage = 0.0f;
 
 void sampleBatteryOnce() {
   // Enable voltage divider
   tca9554SetPin(TCA9554_ADC_EN, false);
-  delay(10); // let divider settle
+  delayMicroseconds(500); // let divider settle (500µs vs 10ms to avoid display flicker)
 
   // Read raw ADC — using analogReadMilliVolts on GPIO 4 only
   int mv = analogReadMilliVolts(BAT_ADC_PIN);
@@ -318,7 +425,7 @@ void sampleBatteryOnce() {
   // Disable divider to reduce power drain
   tca9554SetPin(TCA9554_ADC_EN, true);
 
-  Serial.printf("[Battery] One-shot read: %dmV raw, %.2fV battery\n", mv, cachedBatteryVoltage);
+  Serial.printf("[Battery] Read: %dmV raw, %.2fV battery\n", mv, cachedBatteryVoltage);
 }
 
 float getBatteryVoltage() {
@@ -329,6 +436,64 @@ int getBatteryPercent(float voltage) {
   // LiPo curve: 3.2V = 0%, 4.15V = 100% (conservative)
   int pct = (int)((voltage - 3.2f) / 0.95f * 100.0f);
   return constrain(pct, 0, 100);
+}
+
+// =============================================================
+// IMU Reading — shared between critter and auto-dim
+// =============================================================
+void readIMU() {
+  accelFresh = false;
+  if (!qmiReady) return;
+  if (qmi.getDataReady()) {
+    IMUdata acc, gyro;
+    if (qmi.getAccelerometer(acc.x, acc.y, acc.z)) {
+      lastAccX = acc.x;
+      lastAccY = acc.y;
+      lastAccZ = acc.z;
+      accelFresh = true;
+    }
+    qmi.getGyroscope(gyro.x, gyro.y, gyro.z); // must read both
+  }
+}
+
+// =============================================================
+// Backlight Control (PWM, active-low)
+// =============================================================
+void setBacklight(uint8_t brightness) {
+  currentBrightness = brightness;
+  // Active-low: 0 = full on, 255 = off
+  ledcWrite(LCD_BL_PIN, 255 - brightness);
+}
+
+void updateAutoDim() {
+  if (!qmiReady) return;
+  unsigned long now = millis();
+
+  // Check for motion: delta against previous reading
+  float dx = lastAccX - prevAccX;
+  float dy = lastAccY - prevAccY;
+  float dz = lastAccZ - prevAccZ;
+  float delta = sqrtf(dx*dx + dy*dy + dz*dz);
+  prevAccX = lastAccX;
+  prevAccY = lastAccY;
+  prevAccZ = lastAccZ;
+
+  if (delta > 0.15f) {
+    lastMotionTime = now;
+    if (backlightDimmed) {
+      backlightDimmed = false;
+      setBacklight(BRIGHTNESS);
+      Serial.println("[Dim] Motion detected, restoring brightness");
+    }
+  }
+
+  // Dim after timeout
+  unsigned long dimTimeoutMs = (unsigned long)DIM_TIMEOUT_MIN * 60UL * 1000UL;
+  if (!backlightDimmed && (now - lastMotionTime >= dimTimeoutMs)) {
+    backlightDimmed = true;
+    setBacklight(DIM_BRIGHTNESS);
+    Serial.println("[Dim] No motion, dimming backlight");
+  }
 }
 
 // =============================================================
@@ -366,29 +531,21 @@ const char* weatherLabel(const char* icon) {
 void updateCritter() {
   critterAnimTick++;
 
-  // Read accelerometer tilt
-  float tiltX = 0.0f;
-  if (qmiReady) {
-    IMUdata acc;
-    IMUdata gyro;
-    if (qmi.getDataReady()) {
-      if (qmi.getAccelerometer(acc.x, acc.y, acc.z)) {
-        tiltX = acc.x;
-      }
-      qmi.getGyroscope(gyro.x, gyro.y, gyro.z); // must read both
-    }
-  }
+  // Use shared IMU data (read by readIMU() in loop)
+  float tiltX = qmiReady ? (lastAccX - accelBaseX) : 0.0f;
 
-  // Log accel every 10 ticks for debugging
-  if (qmiReady && critterAnimTick % 10 == 0) {
+  // Log accel every ~10 seconds (70 ticks at 7fps)
+  if (qmiReady && critterAnimTick % 70 == 0) {
     Serial.printf("[Critter] accel x=%.2f state=%d pos=%.0f\n", tiltX, critterState, critterX);
   }
 
-  // Dead zone ±0.5, map to ±20 px/tick max
+  // Dead zone ±1.0, map to ±3 px/tick max (at 7fps, 3*7=21 px/sec)
   float tiltForce = 0.0f;
-  if (tiltX > 0.5f) tiltForce = min((tiltX - 0.5f) * 6.0f, 20.0f);
-  else if (tiltX < -0.5f) tiltForce = max((tiltX + 0.5f) * 6.0f, -20.0f);
+  if (tiltX > 1.0f) tiltForce = min((tiltX - 1.0f) * 1.0f, 3.0f);
+  else if (tiltX < -1.0f) tiltForce = max((tiltX + 1.0f) * 1.0f, -3.0f);
   bool tilting = (fabsf(tiltForce) > 0.1f);
+
+  // (Corner escape removed — world wraps around)
 
   // Blink timer
   if (millis() - critterBlinkTime > 3000 + random(2000)) {
@@ -399,27 +556,27 @@ void updateCritter() {
     critterBlink = false;
   }
 
-  // State machine
+  // State machine (probabilities scaled for ~7fps)
   critterStateTicks++;
 
   switch (critterState) {
     case CRIT_IDLE:
-      critterVX *= 0.8f;
+      critterVX *= 0.9f;
       critterIdleTicks++;
-      if (tilting || random(100) < 10) {
+      if (tilting || random(700) < 10) {
         critterState = CRIT_WALKING;
         critterStateTicks = 0;
         critterIdleTicks = 0;
-      } else if (random(100) < 5) {
+      } else if (random(700) < 5) {
         critterState = CRIT_JUMPING;
         critterStateTicks = 0;
-        critterVY = 6.0f;
+        critterVY = 1.2f;
         critterIdleTicks = 0;
-      } else if (random(100) < 3) {
+      } else if (random(700) < 3) {
         critterState = CRIT_WAVING;
         critterStateTicks = 0;
         critterIdleTicks = 0;
-      } else if (critterIdleTicks > 30) {
+      } else if (critterIdleTicks > 210) {  // ~30 seconds at 7fps
         critterState = CRIT_SLEEPING;
         critterStateTicks = 0;
       }
@@ -429,24 +586,31 @@ void updateCritter() {
       if (tilting) {
         critterVX = tiltForce;
         critterDir = (tiltForce > 0) ? 1 : -1;
+        critterDirTicks = 0;
       } else {
-        critterVX += critterDir * 3.0f;
-        critterVX = constrain(critterVX, -12.0f, 12.0f);
-        if (critterStateTicks > 5 + (int)random(10)) {
+        critterDirTicks++;
+        critterVX += critterDir * 0.4f;
+        critterVX = constrain(critterVX, -2.0f, 2.0f);
+        // After ~120 seconds (840 ticks at 7fps), 50% chance to flip direction
+        if (critterDirTicks > 840 && random(2) == 0) {
+          critterDir = -critterDir;
+          critterDirTicks = 0;
+        }
+        if (critterStateTicks > 35 + (int)random(70)) {
           critterState = CRIT_IDLE;
           critterStateTicks = 0;
         }
       }
-      if (random(100) < 8) {
+      if (random(700) < 8) {
         critterState = CRIT_JUMPING;
         critterStateTicks = 0;
-        critterVY = 6.0f;
+        critterVY = 1.2f;
       }
       break;
 
     case CRIT_JUMPING:
       critterY += critterVY;
-      critterVY -= 2.0f;
+      critterVY -= 0.3f;  // gravity scaled for 7fps
       if (critterY <= 0) {
         critterY = 0;
         critterVY = 0;
@@ -456,7 +620,7 @@ void updateCritter() {
       break;
 
     case CRIT_WAVING:
-      if (critterStateTicks > 5) {
+      if (critterStateTicks > 35) {  // ~5 seconds
         critterState = CRIT_IDLE;
         critterStateTicks = 0;
       }
@@ -464,7 +628,7 @@ void updateCritter() {
 
     case CRIT_SLEEPING:
       critterVX = 0;
-      if (tilting || random(100) < 2) {
+      if (tilting || random(700) < 2) {
         critterState = CRIT_IDLE;
         critterStateTicks = 0;
         critterIdleTicks = 0;
@@ -472,217 +636,663 @@ void updateCritter() {
       break;
   }
 
-  // Apply velocity and clamp
+  // Apply velocity, wrap around edges (toroidal world)
   critterX += critterVX;
-  critterX = constrain(critterX, 6.0f, 634.0f);
+  if (critterX < -15.0f) {
+    critterX = 655.0f;
+  } else if (critterX > 655.0f) {
+    critterX = -15.0f;
+  }
 }
 
 void drawCritter() {
   int cx = (int)critterX;
-  int cy = SCREEN_H - 10 - (int)critterY;
+  int cy = SCREEN_H - 18 - (int)critterY;
+  int dir = critterDir;  // 1=right, -1=left
   bool sleeping = (critterState == CRIT_SLEEPING);
-  int eyeShift = critterDir;
 
-  // Body
-  gfx->fillCircle(cx, cy, 6, CRITTER_BODY);
-  gfx->fillCircle(cx - 1, cy - 2, 3, CRITTER_HIGHLIGHT);
+  // Body — round torso (radius 11)
+  gfx->fillCircle(cx, cy, 11, CRITTER_BODY);
+  // Belly highlight — lighter circle shifted down
+  gfx->fillCircle(cx, cy + 3, 9, CRITTER_HIGHLIGHT);
 
-  // Eyes
+  // Head — overlapping circle at top-front of body
+  int hx = cx + dir * 8;
+  int hy = cy - 8;
+  if (sleeping) hy = cy - 5;  // head droops when sleeping
+  gfx->fillCircle(hx, hy, 6, CRITTER_BODY);
+
+  // Beak — small orange triangle pointing in walk direction
+  int bx = hx + dir * 6;
+  int by = hy;
+  gfx->fillTriangle(bx, by, bx + dir * 6, by + 1, bx, by + 4, CRITTER_BEAK);
+
+  // Eye — single eye on the visible side
+  int ex = hx + dir * 3;
+  int ey = hy - 1;
   if (sleeping || critterBlink) {
-    gfx->drawFastHLine(cx - 4 + eyeShift, cy - 2, 2, CRITTER_EYE);
-    gfx->drawFastHLine(cx + 2 + eyeShift, cy - 2, 2, CRITTER_EYE);
+    // Closed eye — horizontal line
+    gfx->drawFastHLine(ex - 1, ey, 4, CRITTER_EYE);
   } else {
-    gfx->fillCircle(cx - 3 + eyeShift, cy - 2, 1, CRITTER_EYE);
-    gfx->fillCircle(cx + 3 + eyeShift, cy - 2, 1, CRITTER_EYE);
+    gfx->fillCircle(ex, ey, 1, CRITTER_EYE);
   }
 
-  // Cheeks
-  gfx->drawPixel(cx - 5, cy, CRITTER_CHEEK);
-  gfx->drawPixel(cx + 5, cy, CRITTER_CHEEK);
+  // Cheek blush — small pink spot below eye
+  gfx->fillRect(hx + dir * 1, hy + 3, 3, 3, CRITTER_CHEEK);
 
-  // Mouth
+  // Wing — overlapping circle on body, deeper blue
+  int wx = cx - dir * 3;
+  int wy = cy - 1;
+  if (critterState == CRIT_JUMPING || critterState == CRIT_WAVING) {
+    // Wing raised — shifted up
+    int wingWiggle = ((critterAnimTick / 4) % 2 == 0) ? -3 : 0;
+    gfx->fillCircle(wx, wy - 6 + wingWiggle, 6, CRITTER_WING);
+  } else if (critterState == CRIT_WALKING) {
+    // Wing bobs slightly while walking
+    int wingBob = ((critterAnimTick / 4) % 2 == 0) ? -1 : 0;
+    gfx->fillCircle(wx, wy + wingBob, 6, CRITTER_WING);
+  } else {
+    // Idle/sleeping — wing resting at side
+    gfx->fillCircle(wx, wy, 6, CRITTER_WING);
+  }
+
+  // Tail — triangle at back of body, opposite to direction
+  int tx = cx - dir * 11;
+  int ty = cy - 3;
+  gfx->fillTriangle(tx, ty, tx - dir * 8, ty - 6, tx - dir * 5, ty + 1, CRITTER_WING);
+
+  // Legs — two thin rectangles below body with small feet
   if (critterState == CRIT_JUMPING) {
-    gfx->drawPixel(cx, cy + 3, CRITTER_EYE);  // surprised "o"
-  } else if (sleeping) {
-    gfx->drawFastHLine(cx - 1, cy + 2, 3, CRITTER_EYE);  // flat
+    // Legs tucked up during jump
+    gfx->fillRect(cx - 4, cy + 9, 2, 4, CRITTER_BEAK);
+    gfx->fillRect(cx + 3, cy + 9, 2, 4, CRITTER_BEAK);
   } else {
-    gfx->drawPixel(cx - 1, cy + 2, CRITTER_EYE);  // smile arc
-    gfx->drawPixel(cx, cy + 3, CRITTER_EYE);
-    gfx->drawPixel(cx + 1, cy + 2, CRITTER_EYE);
-  }
-
-  // Feet
-  if (critterState == CRIT_JUMPING) {
-    gfx->fillRect(cx - 3, cy + 5, 2, 2, CRITTER_BODY);
-    gfx->fillRect(cx + 1, cy + 5, 2, 2, CRITTER_BODY);
-  } else {
-    int footOff = (critterState == CRIT_WALKING && critterAnimTick % 2 == 0) ? 1 : 0;
-    gfx->fillRect(cx - 4, cy + 6 - footOff, 2, 2, CRITTER_BODY);
-    gfx->fillRect(cx + 2, cy + 6 + footOff, 2, 2, CRITTER_BODY);
-  }
-
-  // Waving arm
-  if (critterState == CRIT_WAVING) {
-    int armWiggle = (critterAnimTick % 2 == 0) ? -1 : 1;
-    gfx->fillRect(cx + critterDir * 7, cy - 4 + armWiggle, 2, 4, CRITTER_BODY);
+    // Walking: alternate leg positions
+    int legOff = (critterState == CRIT_WALKING && (critterAnimTick / 4) % 2 == 0) ? 2 : 0;
+    // Left leg
+    gfx->fillRect(cx - 4, cy + 10 - legOff, 2, 5, CRITTER_BEAK);
+    gfx->fillRect(cx - 5, cy + 14 - legOff, 4, 1, CRITTER_BEAK);  // foot
+    // Right leg
+    gfx->fillRect(cx + 3, cy + 10 + legOff, 2, 5, CRITTER_BEAK);
+    gfx->fillRect(cx + 1, cy + 14 + legOff, 4, 1, CRITTER_BEAK);  // foot
   }
 
   // Sleeping ZZZ
   if (sleeping) {
-    int zy = cy - 10 - (critterAnimTick % 3) * 3;
+    int zy = hy - 10 - ((critterAnimTick / 7) % 3) * 5;
     gfx->setTextColor(TEXT_SECONDARY);
     gfx->setTextSize(1);
-    gfx->setCursor(cx + 6, zy);
+    gfx->setCursor(hx + 8, zy);
     gfx->print("z");
-    if (critterAnimTick % 6 < 3) {
-      gfx->setCursor(cx + 12, zy - 6);
+    if ((critterAnimTick / 7) % 6 < 3) {
+      gfx->setCursor(hx + 15, zy - 9);
       gfx->print("z");
     }
   }
 }
 
 // =============================================================
-// Main Panel (0) — Time | Date | Weather | Battery
+// Sun Arc — visual sunrise/sunset timeline
 // =============================================================
-void drawMainPanel() {
-  gfx->fillScreen(BG_COLOR);
+void drawSunArc(int panelX, int arcCY) {
+  if (weather.sunrise == 0 || weather.sunset == 0) return;
 
-  struct tm t;
-  bool hasTime = getLocalTime(&t, 0);
+  long tzOffset = (long)UTC_OFFSET * 3600 + (long)DST_OFFSET * 3600;
+  unsigned long localNow = (unsigned long)time(nullptr) + tzOffset;
+  unsigned long rise = weather.sunrise + tzOffset;
+  unsigned long set  = weather.sunset  + tzOffset;
 
-  // ── TIME SECTION (x: 0–178) ─────────────────────────────
-  // Two rows centered: HH:MM:SS then AM/PM
-  drawPanel(8, 8, 170, SCREEN_H - 16, PANEL_COLOR);
+  int arcW = 150;
+  int arcH = 28;
+  int arcX = panelX + 13; // center arc in 176px panel
+  int segments = 30;
 
-  if (hasTime) {
-    int hour12 = t.tm_hour % 12;
+  bool isDaytime = (localNow >= rise && localNow < set);
+  float progress;
+
+  if (isDaytime) {
+    progress = (float)(localNow - rise) / (float)(set - rise);
+  } else {
+    // Nighttime: progress across the night
+    unsigned long nightStart, nightEnd;
+    if (localNow >= set) {
+      nightStart = set;
+      nightEnd = rise + 86400; // next sunrise
+    } else {
+      nightStart = set - 86400; // previous sunset
+      nightEnd = rise;
+    }
+    progress = (float)(localNow - nightStart) / (float)(nightEnd - nightStart);
+  }
+  progress = constrain(progress, 0.0f, 1.0f);
+
+  // Draw arc: upward dome for day, downward dome for night
+  for (int i = 0; i < segments; i++) {
+    float a1 = PI * (float)i / segments;
+    float a2 = PI * (float)(i + 1) / segments;
+    int x1 = arcX + (int)(a1 / PI * arcW);
+    int y1, y2;
+    int x2 = arcX + (int)(a2 / PI * arcW);
+    if (isDaytime) {
+      y1 = arcCY - (int)(sinf(a1) * arcH);
+      y2 = arcCY - (int)(sinf(a2) * arcH);
+    } else {
+      y1 = arcCY + (int)(sinf(a1) * arcH);
+      y2 = arcCY + (int)(sinf(a2) * arcH);
+    }
+    gfx->drawLine(x1, y1, x2, y2, TEXT_SECONDARY);
+  }
+
+  // Dot position along arc
+  float dotAngle = PI * progress;
+  int dotX = arcX + (int)(dotAngle / PI * arcW);
+  int dotY;
+  if (isDaytime) {
+    dotY = arcCY - (int)(sinf(dotAngle) * arcH);
+  } else {
+    dotY = arcCY + (int)(sinf(dotAngle) * arcH);
+  }
+  uint16_t dotColor = isDaytime ? WARN_COLOR : TEXT_SECONDARY;
+  gfx->fillCircle(dotX, dotY, 3, dotColor);
+
+  // Time labels at endpoints
+  int riseH = (rise % 86400) / 3600;
+  int riseM = ((rise % 86400) % 3600) / 60;
+  int setH  = (set % 86400) / 3600;
+  int setM  = ((set % 86400) % 3600) / 60;
+
+  // Convert to 12h
+  int rH = riseH % 12; if (rH == 0) rH = 12;
+  int sH = setH % 12;  if (sH == 0) sH = 12;
+
+  char rBuf[8], sBuf[8];
+  snprintf(rBuf, sizeof(rBuf), "%d:%02d", rH, riseM);
+  snprintf(sBuf, sizeof(sBuf), "%d:%02d", sH, setM);
+
+  gfx->setTextColor(TEXT_SECONDARY);
+  gfx->setTextSize(1);
+  gfx->setCursor(arcX, arcCY + 6);
+  gfx->print(rBuf);
+  int sLen = strlen(sBuf) * 6;
+  gfx->setCursor(arcX + arcW - sLen, arcCY + 6);
+  gfx->print(sBuf);
+}
+
+// =============================================================
+// Tile Draw Functions — extracted per-column, per-tile content
+// Each takes panel coordinates (px, py, pw, ph)
+// =============================================================
+
+// ── TIME tile 0: Clock (HH:MM:SS + AM/PM) ──────────────────
+void drawTimeTile0(int px, int py, int pw, int ph, struct tm* t) {
+  if (t) {
+    int hour12 = t->tm_hour % 12;
     if (hour12 == 0) hour12 = 12;
 
-    // HH:MM:SS — centered
     char timeBuf[10];
-    snprintf(timeBuf, sizeof(timeBuf), "%d:%02d:%02d", hour12, t.tm_min, t.tm_sec);
-    int timeW = strlen(timeBuf) * 18; // textSize 3: 6*3=18px per char
+    snprintf(timeBuf, sizeof(timeBuf), "%d:%02d:%02d", hour12, t->tm_min, t->tm_sec);
+    int timeW = strlen(timeBuf) * 18;
     gfx->setTextColor(TEXT_PRIMARY);
     gfx->setTextSize(3);
-    gfx->setCursor(8 + (170 - timeW) / 2, 48);
+    gfx->setCursor(px + (pw - timeW) / 2, py + 40);
     gfx->print(timeBuf);
 
-    // AM/PM — centered below
-    const char* ampm = t.tm_hour >= 12 ? "PM" : "AM";
+    const char* ampm = t->tm_hour >= 12 ? "PM" : "AM";
     gfx->setTextColor(TEXT_SECONDARY);
     gfx->setTextSize(2);
-    gfx->setCursor(8 + (170 - 24) / 2, 82); // 2 chars * 12px = 24px
+    gfx->setCursor(px + (pw - 24) / 2, py + 74);
     gfx->print(ampm);
   } else {
     gfx->setTextColor(TEXT_DIM);
     gfx->setTextSize(3);
-    gfx->setCursor(8 + (170 - 90) / 2, 60); // "--:--" = 5 chars * 18px
+    gfx->setCursor(px + (pw - 90) / 2, py + 52);
     gfx->print("--:--");
   }
+}
 
-  // ── DATE SECTION (x: 186–362) ──────────────────────────
-  drawPanel(186, 8, 176, SCREEN_H - 16, PANEL_COLOR);
+// ── TIME tile 1: World Clocks ───────────────────────────────
+void drawTimeTile1(int px, int py, int pw, int ph) {
+  // time(nullptr) returns UTC epoch on ESP32
+  time_t utcEpoch = time(nullptr);
 
-  if (hasTime) {
-    // Day of week
-    const char* days[] = {"Sunday", "Monday", "Tuesday", "Wednesday",
-                          "Thursday", "Friday", "Saturday"};
-    gfx->setTextColor(ACCENT_COLOR);
-    gfx->setTextSize(2);
-    gfx->setCursor(198, 24);
-    gfx->print(days[t.tm_wday]);
+  const char* labels[] = { WORLD_CLOCK_1_LABEL, WORLD_CLOCK_2_LABEL, WORLD_CLOCK_3_LABEL };
+  const int offsets[] = { WORLD_CLOCK_1_OFFSET, WORLD_CLOCK_2_OFFSET, WORLD_CLOCK_3_OFFSET };
 
-    // Month Day
-    const char* months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
-    char dateBuf[16];
-    snprintf(dateBuf, sizeof(dateBuf), "%s %d", months[t.tm_mon], t.tm_mday);
+  for (int i = 0; i < 3; i++) {
+    int rowY = py + 12 + i * 46;
+
+    // Label
+    gfx->setTextColor(TEXT_SECONDARY);
+    gfx->setTextSize(1);
+    gfx->setCursor(px + 12, rowY);
+    gfx->print(labels[i]);
+
+    // Time (offsets are in minutes from UTC)
+    time_t clockEpoch = utcEpoch + (long)offsets[i] * 60;
+    struct tm ct;
+    gmtime_r(&clockEpoch, &ct);
+    int h12 = ct.tm_hour % 12;
+    if (h12 == 0) h12 = 12;
+    char buf[10];
+    snprintf(buf, sizeof(buf), "%d:%02d %s", h12, ct.tm_min, ct.tm_hour >= 12 ? "PM" : "AM");
     gfx->setTextColor(TEXT_PRIMARY);
     gfx->setTextSize(2);
-    gfx->setCursor(198, 52);
-    gfx->print(dateBuf);
+    gfx->setCursor(px + 12, rowY + 12);
+    gfx->print(buf);
+  }
+}
 
-    // Year — same size as date, slightly off-white
-    char yearBuf[6];
-    snprintf(yearBuf, sizeof(yearBuf), "%d", t.tm_year + 1900);
-    gfx->setTextColor(TEXT_SECONDARY);
-    gfx->setTextSize(2);
-    gfx->setCursor(198, 80);
-    gfx->print(yearBuf);
+// ── DATE tile 0: Day/Month/Year ─────────────────────────────
+void drawDateTile0(int px, int py, int pw, int ph, struct tm* t) {
+  if (!t) return;
 
-    // Week number — same size as date, slightly off-white
-    int weekNum = (t.tm_yday + 7 - ((t.tm_wday + 6) % 7)) / 7;
-    char weekBuf[12];
-    snprintf(weekBuf, sizeof(weekBuf), "Week %d", weekNum);
-    gfx->setTextColor(TEXT_SECONDARY);
-    gfx->setTextSize(2);
-    gfx->setCursor(198, 108);
-    gfx->print(weekBuf);
+  const char* days[] = {"Sunday", "Monday", "Tuesday", "Wednesday",
+                        "Thursday", "Friday", "Saturday"};
+  gfx->setTextColor(ACCENT_COLOR);
+  gfx->setTextSize(2);
+  gfx->setCursor(px + 12, py + 12);
+  gfx->print(days[t->tm_wday]);
+
+  const char* months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                          "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+  char dateBuf[16];
+  snprintf(dateBuf, sizeof(dateBuf), "%s %d", months[t->tm_mon], t->tm_mday);
+  gfx->setTextColor(TEXT_PRIMARY);
+  gfx->setTextSize(2);
+  gfx->setCursor(px + 12, py + 36);
+  gfx->print(dateBuf);
+
+  char yearBuf[6];
+  snprintf(yearBuf, sizeof(yearBuf), "%d", t->tm_year + 1900);
+  gfx->setTextColor(TEXT_SECONDARY);
+  gfx->setTextSize(2);
+  gfx->setCursor(px + 12, py + 60);
+  gfx->print(yearBuf);
+
+  // Day of year / days remaining
+  char doyBuf[16];
+  int doy = t->tm_yday + 1;
+  int daysLeft = (((t->tm_year + 1900) % 4 == 0) ? 366 : 365) - doy;
+  snprintf(doyBuf, sizeof(doyBuf), "Day %d (-%d)", doy, daysLeft);
+  gfx->setTextColor(TEXT_DIM);
+  gfx->setTextSize(1);
+  gfx->setCursor(px + 12, py + 88);
+  gfx->print(doyBuf);
+}
+
+// ── DATE tile 1: Sun Arc ────────────────────────────────────
+void drawDateTile1(int px, int py, int pw, int ph) {
+  if (weather.sunrise == 0 || weather.sunset == 0) {
+    gfx->setTextColor(TEXT_DIM);
+    gfx->setTextSize(1);
+    gfx->setCursor(px + 12, py + 40);
+    gfx->print("No sun data");
+    return;
   }
 
-  // ── WEATHER SECTION (x: 370–526) ──────────────────────
-  drawPanel(370, 8, 156, SCREEN_H - 16, PANEL_COLOR);
+  long tzOffset = (long)UTC_OFFSET * 3600 + (long)DST_OFFSET * 3600;
+  unsigned long rise = weather.sunrise + tzOffset;
+  unsigned long set  = weather.sunset  + tzOffset;
 
+  int riseH = (rise % 86400) / 3600;
+  int riseM = ((rise % 86400) % 3600) / 60;
+  int setH  = (set % 86400) / 3600;
+  int setM  = ((set % 86400) % 3600) / 60;
+  int rH = riseH % 12; if (rH == 0) rH = 12;
+  int sH = setH % 12;  if (sH == 0) sH = 12;
+
+  // Sunrise/sunset times — orange, textSize 2
+  char buf[24];
+  gfx->setTextColor(WARN_COLOR);
+  gfx->setTextSize(2);
+  snprintf(buf, sizeof(buf), "Rise %d:%02d%s", rH, riseM, riseH >= 12 ? "p" : "a");
+  gfx->setCursor(px + 12, py + 10);
+  gfx->print(buf);
+
+  snprintf(buf, sizeof(buf), "Set  %d:%02d%s", sH, setM, setH >= 12 ? "p" : "a");
+  gfx->setCursor(px + 12, py + 32);
+  gfx->print(buf);
+
+  // Sun arc — below the text
+  drawSunArc(px, py + 78);
+
+  // Day + night length — textSize 2
+  unsigned long dayLen = weather.sunset - weather.sunrise;
+  unsigned long nightLen = 86400 - dayLen;
+  int dlH = dayLen / 3600;
+  int dlM = (dayLen % 3600) / 60;
+  int nlH = nightLen / 3600;
+  int nlM = (nightLen % 3600) / 60;
+
+  gfx->setTextColor(WARN_COLOR);
+  gfx->setTextSize(2);
+  snprintf(buf, sizeof(buf), "%dh%dm", dlH, dlM);
+  gfx->setCursor(px + 12, py + 110);
+  gfx->print(buf);
+
+  gfx->setTextColor(TEXT_SECONDARY);
+  snprintf(buf, sizeof(buf), "%dh%dm", nlH, nlM);
+  int nw = strlen(buf) * 12;
+  gfx->setCursor(px + pw - nw - 12, py + 110);
+  gfx->print(buf);
+}
+
+// ── DATE tile 2: Moon Phase ─────────────────────────────────
+float moonAge(int year, int month, int day) {
+  int a = (14 - month) / 12;
+  int y = year + 4800 - a;
+  int m = month + 12 * a - 3;
+  long jdn = day + (153L*m + 2)/5 + 365L*y + y/4 - y/100 + y/400 - 32045;
+  float age = fmod((float)(jdn - 2451550) + 0.5f, 29.53059f);
+  return age < 0 ? age + 29.53059f : age;
+}
+
+const char* moonPhaseName(float age) {
+  if (age < 1.85f)  return "New Moon";
+  if (age < 5.53f)  return "Wax Crescent";
+  if (age < 9.22f)  return "First Quarter";
+  if (age < 12.91f) return "Wax Gibbous";
+  if (age < 16.61f) return "Full Moon";
+  if (age < 20.30f) return "Wan Gibbous";
+  if (age < 23.99f) return "Last Quarter";
+  if (age < 27.68f) return "Wan Crescent";
+  return "New Moon";
+}
+
+void drawDateTile2(int px, int py, int pw, int ph, struct tm* t) {
+  if (!t) return;
+
+  float age = moonAge(t->tm_year + 1900, t->tm_mon + 1, t->tm_mday);
+  float phase = age / 29.53059f;  // 0-1
+  float illum = 0.5f * (1.0f - cosf(phase * 2.0f * PI));
+  bool waxing = (age < 14.765f);
+
+  // Draw moon circle
+  int mcx = px + pw / 2;
+  int mcy = py + 50;
+  int mr = 25;
+
+  // Shadow (dark circle)
+  gfx->fillCircle(mcx, mcy, mr, gfx->color565(30, 30, 40));
+
+  // Illuminated portion — scanline by scanline
+  uint16_t litColor = gfx->color565(220, 215, 190);
+  for (int row = -mr; row <= mr; row++) {
+    float halfW = sqrtf((float)(mr * mr - row * row));
+    float litW = halfW * illum * 2.0f;
+    int x1, x2;
+    if (waxing) {
+      // Illuminated on right side
+      x1 = mcx + (int)(halfW - litW);
+      x2 = mcx + (int)halfW;
+    } else {
+      // Illuminated on left side
+      x1 = mcx - (int)halfW;
+      x2 = mcx - (int)(halfW - litW);
+    }
+    if (x2 > x1) {
+      gfx->drawFastHLine(x1, mcy + row, x2 - x1, litColor);
+    }
+  }
+
+  // Phase name — textSize 2
+  const char* name = moonPhaseName(age);
+  int nameW = strlen(name) * 12;
+  gfx->setTextColor(TEXT_PRIMARY);
+  gfx->setTextSize(2);
+  gfx->setCursor(px + (pw - nameW) / 2, py + 86);
+  gfx->print(name);
+
+  // Illumination percentage — textSize 2
+  char illBuf[10];
+  snprintf(illBuf, sizeof(illBuf), "%.0f%% lit", illum * 100.0f);
+  int illW = strlen(illBuf) * 12;
+  gfx->setTextColor(TEXT_SECONDARY);
+  gfx->setTextSize(2);
+  gfx->setCursor(px + (pw - illW) / 2, py + 108);
+  gfx->print(illBuf);
+}
+
+// ── Weather Icon (drawn with GFX primitives) ───────────────
+void drawWeatherIcon(int cx, int cy, const char* icon) {
+  bool night = (icon[2] == 'n');
+  // Sun / Moon base
+  if (strncmp(icon, "01", 2) == 0) {
+    // Clear sky
+    if (night) {
+      // Moon crescent
+      gfx->fillCircle(cx, cy, 12, gfx->color565(220, 215, 180));
+      gfx->fillCircle(cx + 6, cy - 4, 10, PANEL_COLOR);
+    } else {
+      // Sun
+      gfx->fillCircle(cx, cy, 10, WARN_COLOR);
+      for (int a = 0; a < 8; a++) {
+        float angle = a * PI / 4.0f;
+        int rx = cx + (int)(cosf(angle) * 15);
+        int ry = cy - (int)(sinf(angle) * 15);
+        gfx->fillCircle(rx, ry, 2, WARN_COLOR);
+      }
+    }
+  } else if (strncmp(icon, "02", 2) == 0) {
+    // Few clouds — sun/moon peeking out
+    if (!night) {
+      gfx->fillCircle(cx - 4, cy - 6, 8, WARN_COLOR);
+    } else {
+      gfx->fillCircle(cx - 4, cy - 6, 6, gfx->color565(200, 195, 170));
+    }
+    // Small cloud in front
+    gfx->fillCircle(cx + 2, cy + 2, 8, gfx->color565(180, 180, 195));
+    gfx->fillCircle(cx - 6, cy + 4, 6, gfx->color565(180, 180, 195));
+    gfx->fillCircle(cx + 8, cy + 5, 5, gfx->color565(180, 180, 195));
+  } else if (strncmp(icon, "03", 2) == 0 || strncmp(icon, "04", 2) == 0) {
+    // Clouds
+    gfx->fillCircle(cx, cy - 2, 9, gfx->color565(160, 160, 175));
+    gfx->fillCircle(cx - 8, cy + 3, 7, gfx->color565(150, 150, 165));
+    gfx->fillCircle(cx + 8, cy + 3, 6, gfx->color565(150, 150, 165));
+    gfx->fillRoundRect(cx - 12, cy + 2, 24, 8, 3, gfx->color565(150, 150, 165));
+  } else if (strncmp(icon, "09", 2) == 0 || strncmp(icon, "10", 2) == 0) {
+    // Rain
+    gfx->fillCircle(cx, cy - 4, 8, gfx->color565(130, 130, 150));
+    gfx->fillCircle(cx - 7, cy, 6, gfx->color565(130, 130, 150));
+    gfx->fillCircle(cx + 7, cy, 5, gfx->color565(130, 130, 150));
+    // Raindrops
+    for (int d = -1; d <= 1; d++) {
+      gfx->fillRect(cx + d * 7, cy + 8, 2, 5, ACCENT_COLOR);
+    }
+  } else if (strncmp(icon, "11", 2) == 0) {
+    // Thunderstorm
+    gfx->fillCircle(cx, cy - 4, 8, gfx->color565(100, 100, 120));
+    gfx->fillCircle(cx - 7, cy, 6, gfx->color565(100, 100, 120));
+    gfx->fillCircle(cx + 7, cy, 5, gfx->color565(100, 100, 120));
+    // Lightning bolt
+    gfx->fillTriangle(cx, cy + 6, cx + 4, cy + 6, cx - 2, cy + 14, WARN_COLOR);
+  } else if (strncmp(icon, "13", 2) == 0) {
+    // Snow
+    gfx->fillCircle(cx, cy - 4, 8, gfx->color565(170, 170, 185));
+    // Snowflakes
+    for (int d = -1; d <= 1; d++) {
+      gfx->fillCircle(cx + d * 7, cy + 10, 2, TEXT_PRIMARY);
+    }
+  } else if (strncmp(icon, "50", 2) == 0) {
+    // Fog — horizontal lines
+    for (int l = 0; l < 4; l++) {
+      gfx->drawFastHLine(cx - 12, cy - 6 + l * 5, 24, gfx->color565(150, 150, 165));
+    }
+  }
+}
+
+// ── WEATHER tile 0: Temp + Icon + Description ───────────────
+void drawWeatherTile0(int px, int py, int pw, int ph) {
   if (weather.valid) {
+    // Weather icon — top right area
+    drawWeatherIcon(px + pw - 30, py + 28, weather.icon);
+
     // Temperature — large
     char tempBuf[10];
     const char* unit = (strcmp(OWM_UNITS, "imperial") == 0) ? "F" : "C";
     snprintf(tempBuf, sizeof(tempBuf), "%.0f\xF8%s", weather.temp, unit);
     gfx->setTextColor(TEXT_PRIMARY);
     gfx->setTextSize(4);
-    gfx->setCursor(382, 22);
+    gfx->setCursor(px + 12, py + 14);
     gfx->print(tempBuf);
 
-    // Description — word wrap if > 12 chars (panel is ~144px at textSize 2)
+    // Description — word wrap if > 12 chars
     gfx->setTextColor(ACCENT_COLOR);
     gfx->setTextSize(2);
     int descLen = strlen(weather.description);
     int maxChars = 12;
     if (descLen <= maxChars) {
-      gfx->setCursor(382, 68);
+      gfx->setCursor(px + 12, py + 60);
       gfx->print(weather.description);
     } else {
-      // Find last space within maxChars
       int split = maxChars;
       for (int i = maxChars - 1; i > 0; i--) {
         if (weather.description[i] == ' ') { split = i; break; }
       }
       char line1[32];
       strlcpy(line1, weather.description, split + 1);
-      gfx->setCursor(382, 62);
+      gfx->setCursor(px + 12, py + 54);
       gfx->print(line1);
-      gfx->setCursor(382, 82);
+      gfx->setCursor(px + 12, py + 74);
       gfx->print(&weather.description[split + (weather.description[split] == ' ' ? 1 : 0)]);
     }
 
-    // Feels like + humidity
-    char detailBuf[28];
-    snprintf(detailBuf, sizeof(detailBuf), "Feels %.0f\xF8 | %d%%", weather.feels_like, weather.humidity);
+    // Feels like
+    char detailBuf[20];
+    snprintf(detailBuf, sizeof(detailBuf), "Feels %.0f\xF8%s", weather.feels_like, unit);
     gfx->setTextColor(TEXT_SECONDARY);
     gfx->setTextSize(1);
-    gfx->setCursor(382, 106);
+    gfx->setCursor(px + 12, py + 98);
     gfx->print(detailBuf);
   } else {
     gfx->setTextColor(TEXT_DIM);
     gfx->setTextSize(2);
-    gfx->setCursor(390, 50);
+    gfx->setCursor(px + 20, py + 42);
     gfx->print("Weather");
-    gfx->setCursor(390, 78);
+    gfx->setCursor(px + 20, py + 70);
     gfx->print("loading...");
   }
+}
 
-  // ── STATUS SECTION (x: 534–632) ───────────────────────
-  drawPanel(534, 8, 98, SCREEN_H - 16, PANEL_COLOR);
+// ── WEATHER tile 1: AQI ─────────────────────────────────────
+void drawWeatherTile1(int px, int py, int pw, int ph) {
+  gfx->setTextColor(TEXT_SECONDARY);
+  gfx->setTextSize(1);
+  gfx->setCursor(px + 12, py + 12);
+  gfx->print("Air Quality");
 
+  if (weather.aqi > 0) {
+    // Large AQI number
+    char aqiNum[4];
+    snprintf(aqiNum, sizeof(aqiNum), "%d", weather.aqi);
+    gfx->setTextColor(aqiColor(weather.aqi));
+    gfx->setTextSize(5);
+    int numW = strlen(aqiNum) * 30;
+    gfx->setCursor(px + (pw - numW) / 2, py + 30);
+    gfx->print(aqiNum);
+
+    // Label
+    const char* label = aqiLabel(weather.aqi);
+    int labelW = strlen(label) * 12;
+    gfx->setTextSize(2);
+    gfx->setCursor(px + (pw - labelW) / 2, py + 78);
+    gfx->print(label);
+
+    // PM2.5
+    char pmBuf[20];
+    snprintf(pmBuf, sizeof(pmBuf), "PM2.5: %.1f", weather.pm2_5);
+    gfx->setTextColor(TEXT_DIM);
+    gfx->setTextSize(1);
+    int pmW = strlen(pmBuf) * 6;
+    gfx->setCursor(px + (pw - pmW) / 2, py + 100);
+    gfx->print(pmBuf);
+  } else {
+    gfx->setTextColor(TEXT_DIM);
+    gfx->setTextSize(2);
+    gfx->setCursor(px + 12, py + 50);
+    gfx->print("No data");
+  }
+}
+
+// ── Wind direction label ────────────────────────────────────
+const char* windDir(int deg) {
+  if (deg < 23)  return "N";
+  if (deg < 68)  return "NE";
+  if (deg < 113) return "E";
+  if (deg < 158) return "SE";
+  if (deg < 203) return "S";
+  if (deg < 248) return "SW";
+  if (deg < 293) return "W";
+  if (deg < 338) return "NW";
+  return "N";
+}
+
+// ── WEATHER tile 2: Wind + Conditions ───────────────────────
+void drawWeatherTile2(int px, int py, int pw, int ph) {
+  if (!weather.valid) {
+    gfx->setTextColor(TEXT_DIM);
+    gfx->setTextSize(1);
+    gfx->setCursor(px + 12, py + 50);
+    gfx->print("No data");
+    return;
+  }
+
+  char buf[24];
+  const char* speedUnit = (strcmp(OWM_UNITS, "imperial") == 0) ? "mph" : "m/s";
+
+  // Wind speed — large
+  gfx->setTextColor(TEXT_PRIMARY);
+  gfx->setTextSize(3);
+  snprintf(buf, sizeof(buf), "%.0f", weather.wind_speed);
+  gfx->setCursor(px + 12, py + 10);
+  gfx->print(buf);
+
+  gfx->setTextColor(TEXT_SECONDARY);
+  gfx->setTextSize(1);
+  gfx->setCursor(px + 12, py + 36);
+  snprintf(buf, sizeof(buf), "%s %s", speedUnit, windDir(weather.wind_deg));
+  gfx->print(buf);
+
+  // Humidity
+  gfx->setTextColor(ACCENT_COLOR);
+  gfx->setTextSize(2);
+  gfx->setCursor(px + 12, py + 54);
+  snprintf(buf, sizeof(buf), "%d%% rh", weather.humidity);
+  gfx->print(buf);
+
+  // Pressure
+  gfx->setTextColor(TEXT_SECONDARY);
+  gfx->setTextSize(1);
+  gfx->setCursor(px + 12, py + 80);
+  snprintf(buf, sizeof(buf), "%dhPa", weather.pressure);
+  gfx->print(buf);
+
+  // Visibility
+  gfx->setCursor(px + 12, py + 96);
+  if (weather.visibility >= 1000) {
+    snprintf(buf, sizeof(buf), "Vis: %dkm", weather.visibility / 1000);
+  } else {
+    snprintf(buf, sizeof(buf), "Vis: %dm", weather.visibility);
+  }
+  gfx->print(buf);
+
+  // Clouds
+  gfx->setCursor(px + 12, py + 112);
+  snprintf(buf, sizeof(buf), "Clouds: %d%%", weather.clouds);
+  gfx->print(buf);
+}
+
+// ── STATUS tile 0: WiFi + Battery + Uptime ──────────────────
+void drawStatusTile0(int px, int py, int pw, int ph) {
   // WiFi status
   gfx->setTextSize(2);
-  gfx->setCursor(544, 16);
+  gfx->setCursor(px + 10, py + 8);
   if (wifiConnected) {
     gfx->setTextColor(GOOD_COLOR);
     gfx->print("WiFi");
     gfx->setTextSize(1);
     gfx->setTextColor(TEXT_DIM);
-    gfx->setCursor(544, 38);
+    gfx->setCursor(px + 10, py + 30);
     int rssi = WiFi.RSSI();
     char rssiBuf[12];
     snprintf(rssiBuf, sizeof(rssiBuf), "%ddBm", rssi);
@@ -692,10 +1302,10 @@ void drawMainPanel() {
     gfx->print("No WiFi");
   }
 
-  // Battery (sampled once at boot)
+  // Battery
   float batV = getBatteryVoltage();
   gfx->setTextSize(2);
-  gfx->setCursor(544, 58);
+  gfx->setCursor(px + 10, py + 50);
   if (batV > 0.5f) {
     int batPct = getBatteryPercent(batV);
     if (batPct > 50)      gfx->setTextColor(GOOD_COLOR);
@@ -721,21 +1331,176 @@ void drawMainPanel() {
   }
   gfx->setTextSize(2);
   gfx->setTextColor(TEXT_DIM);
-  gfx->setCursor(544, 100);
+  gfx->setCursor(px + 10, py + 92);
   gfx->print(uptBuf);
 
   // Free heap
   char heapBuf[8];
   snprintf(heapBuf, sizeof(heapBuf), "%dK", ESP.getFreeHeap() / 1024);
-  gfx->setCursor(544, 130);
+  gfx->setCursor(px + 10, py + 122);
   gfx->print(heapBuf);
+}
+
+// ── STATUS tile 1: System Info ──────────────────────────────
+void drawStatusTile1(int px, int py, int pw, int ph) {
+  gfx->setTextColor(TEXT_SECONDARY);
+  gfx->setTextSize(1);
+  int rowY = py + 10;
+  int rowH = 14;
+  char buf[20];
+
+  // IP
+  gfx->setCursor(px + 6, rowY);
+  if (wifiConnected) {
+    gfx->print(WiFi.localIP().toString().c_str());
+  } else {
+    gfx->print("No IP");
+  }
+
+  // RSSI
+  rowY += rowH;
+  gfx->setCursor(px + 6, rowY);
+  snprintf(buf, sizeof(buf), "RSSI:%ddBm", wifiConnected ? WiFi.RSSI() : 0);
+  gfx->print(buf);
+
+  // Heap
+  rowY += rowH;
+  gfx->setCursor(px + 6, rowY);
+  snprintf(buf, sizeof(buf), "Heap:%dK", ESP.getFreeHeap() / 1024);
+  gfx->print(buf);
+
+  // PSRAM
+  rowY += rowH;
+  gfx->setCursor(px + 6, rowY);
+  snprintf(buf, sizeof(buf), "PSRAM:%dK", ESP.getFreePsram() / 1024);
+  gfx->print(buf);
+
+  // CPU MHz
+  rowY += rowH;
+  gfx->setCursor(px + 6, rowY);
+  snprintf(buf, sizeof(buf), "CPU:%dMHz", ESP.getCpuFreqMHz());
+  gfx->print(buf);
+
+  // Flash
+  rowY += rowH;
+  gfx->setCursor(px + 6, rowY);
+  snprintf(buf, sizeof(buf), "Flash:%dMB", ESP.getFlashChipSize() / (1024*1024));
+  gfx->print(buf);
+
+  // Uptime
+  rowY += rowH;
+  unsigned long uptimeSec = millis() / 1000;
+  unsigned long hrs = uptimeSec / 3600;
+  unsigned long mins = (uptimeSec % 3600) / 60;
+  gfx->setCursor(px + 6, rowY);
+  snprintf(buf, sizeof(buf), "Up:%luh%lum", hrs, mins);
+  gfx->print(buf);
+}
+
+// =============================================================
+// Tile Indicator Dots — shows which tile is active
+// =============================================================
+void drawTileIndicator(int px, int py, int pw, int ph, int numTiles, int active) {
+  if (numTiles <= 1) return;
+
+  int dotR = 2;
+  int spacing = 8;
+  int totalW = numTiles * (dotR * 2) + (numTiles - 1) * (spacing - dotR * 2);
+  int startX = px + (pw - totalW * 1) / 2;
+  int dotY = py + ph - 6;
+
+  for (int i = 0; i < numTiles; i++) {
+    int dx = startX + i * spacing;
+    uint16_t color = (i == active) ? ACCENT_COLOR : TEXT_DIM;
+    gfx->fillCircle(dx, dotY, dotR, color);
+  }
+}
+
+// =============================================================
+// Page 1 Placeholder
+// =============================================================
+void drawPage1() {
+  drawPanel(8, 8, SCREEN_W - 16, SCREEN_H - 16, PANEL_COLOR);
+
+  gfx->setTextColor(TEXT_SECONDARY);
+  gfx->setTextSize(3);
+  int msgW = 14 * 18; // ~14 chars at textSize 3
+  gfx->setCursor((SCREEN_W - msgW) / 2, 50);
+  gfx->print("Page 2");
+
+  gfx->setTextColor(TEXT_DIM);
+  gfx->setTextSize(2);
+  gfx->setCursor((SCREEN_W - 12 * 12) / 2, 100);
+  gfx->print("Coming soon");
+}
+
+// =============================================================
+// Page Indicator — shows current page (e.g. "1/2")
+// =============================================================
+void drawPageIndicator() {
+  if (NUM_PAGES <= 1) return;
+
+  char buf[6];
+  snprintf(buf, sizeof(buf), "%d/%d", currentPage + 1, NUM_PAGES);
+  gfx->setTextColor(TEXT_DIM);
+  gfx->setTextSize(1);
+  int bw = strlen(buf) * 6;
+  gfx->setCursor(SCREEN_W - bw - 4, SCREEN_H - 10);
+  gfx->print(buf);
+}
+
+// =============================================================
+// Main Panel — dispatches to tile draw functions
+// =============================================================
+void drawMainPanel() {
+  gfx->fillScreen(BG_COLOR);
+
+  if (currentPage == 0) {
+    struct tm t;
+    bool hasTime = getLocalTime(&t, 0);
+
+    // Draw each column panel + dispatch to active tile
+    for (int c = 0; c < NUM_COLUMNS; c++) {
+      int px = COL_GEOM[c].x;
+      int pw = COL_GEOM[c].w;
+      int py = 8;
+      int ph = SCREEN_H - 16;
+
+      drawPanel(px, py, pw, ph, PANEL_COLOR);
+
+      switch (c) {
+        case 0: // Time
+          if (currentTile[0] == 0) drawTimeTile0(px, py, pw, ph, hasTime ? &t : nullptr);
+          else                     drawTimeTile1(px, py, pw, ph);
+          break;
+        case 1: // Date
+          if (currentTile[1] == 0)      drawDateTile0(px, py, pw, ph, hasTime ? &t : nullptr);
+          else if (currentTile[1] == 1) drawDateTile1(px, py, pw, ph);
+          else                           drawDateTile2(px, py, pw, ph, hasTime ? &t : nullptr);
+          break;
+        case 2: // Weather
+          if (currentTile[2] == 0)      drawWeatherTile0(px, py, pw, ph);
+          else if (currentTile[2] == 1) drawWeatherTile1(px, py, pw, ph);
+          else                           drawWeatherTile2(px, py, pw, ph);
+          break;
+        case 3: // Status
+          if (currentTile[3] == 0) drawStatusTile0(px, py, pw, ph);
+          else                     drawStatusTile1(px, py, pw, ph);
+          break;
+      }
+
+      drawTileIndicator(px, py, pw, ph, COL_GEOM[c].numTiles, currentTile[c]);
+    }
 
 #if CRITTER_ENABLED
-  // Critter pet — draw after panels so it overlaps bottom edges
-  updateCritter();
-  drawCritter();
+    updateCritter();
+    drawCritter();
 #endif
+  } else {
+    drawPage1();
+  }
 
+  drawPageIndicator();
   gfx->flush();
 }
 
@@ -775,31 +1540,82 @@ void drawSplash(const char* status) {
 
 TouchPoint readTouch() {
   TouchPoint tp = { 0, 0, false };
-  uint8_t buf[6] = {0};
+
+  // AXS15231B requires this magic command sequence to request touch data
+  static const uint8_t read_touchpad_cmd[] = {0xb5, 0xab, 0xa5, 0x5a, 0x0, 0x0, 0x0, 0x08};
 
   Wire.beginTransmission(TOUCH_ADDR);
-  Wire.write(0x00);
-  Wire.endTransmission(false);
-  Wire.requestFrom((uint8_t)TOUCH_ADDR, (uint8_t)6);
+  Wire.write(read_touchpad_cmd, 8);
+  Wire.endTransmission();
 
-  for (int i = 0; i < 6 && Wire.available(); i++) {
+  uint8_t buf[14] = {0};
+  Wire.requestFrom((uint8_t)TOUCH_ADDR, (uint8_t)14);
+  for (int i = 0; i < 14 && Wire.available(); i++) {
     buf[i] = Wire.read();
   }
 
-  // AXS15231B touch data format:
-  // buf[0]: event flag (bit 7-6: 0=down, 1=up, 2=contact)
-  // buf[1]: touch point ID
-  // buf[2-3]: X (12-bit)
-  // buf[4-5]: Y (12-bit)
-  uint8_t event = buf[0] >> 6;
-  if (event == 0 || event == 2) { // down or contact
-    tp.x = ((buf[0] & 0x0F) << 8) | buf[1];
-    tp.y = ((buf[2] & 0x0F) << 8) | buf[3];
-    // Filter out false positives where all bytes are zero
-    tp.pressed = (tp.x != 0 || tp.y != 0);
+  // AXS15231B response format:
+  // buf[0]: gesture type
+  // buf[1]: number of touch points (1-4 = valid)
+  // buf[2]: X high nibble (bits 3:0)
+  // buf[3]: X low byte
+  // buf[4]: Y high nibble (bits 3:0)
+  // buf[5]: Y low byte
+  uint8_t pointNum = buf[1];
+  if (pointNum > 0 && pointNum < 5) {
+    tp.x = ((uint16_t)(buf[2] & 0x0F) << 8) | (uint16_t)buf[3];
+    tp.y = ((uint16_t)(buf[4] & 0x0F) << 8) | (uint16_t)buf[5];
+    tp.pressed = true;
   }
 
   return tp;
+}
+
+// =============================================================
+// Touch Navigation
+// =============================================================
+void handleTouch(int lx, int ly, unsigned long now) {
+  // Edge zones: page navigation
+  if (lx < 30) {
+    if (currentPage > 0) {
+      currentPage--;
+      lastNavTime = now;
+      Serial.printf("[Nav] Page prev → %d\n", currentPage);
+    }
+    return;
+  }
+  if (lx > 610) {
+    if (currentPage < NUM_PAGES - 1) {
+      currentPage++;
+      lastNavTime = now;
+      Serial.printf("[Nav] Page next → %d\n", currentPage);
+    }
+    return;
+  }
+
+  // Only handle column tile nav on page 0
+  if (currentPage != 0) return;
+
+  // Find which column was tapped
+  for (int c = 0; c < NUM_COLUMNS; c++) {
+    int cx = COL_GEOM[c].x;
+    int cw = COL_GEOM[c].w;
+    if (lx >= cx && lx < cx + cw) {
+      uint8_t numT = COL_GEOM[c].numTiles;
+      if (numT <= 1) return;  // no tiles to cycle
+
+      if (ly < 86) {
+        // Top half: previous tile (wrap around)
+        currentTile[c] = (currentTile[c] + numT - 1) % numT;
+      } else {
+        // Bottom half: next tile (wrap around)
+        currentTile[c] = (currentTile[c] + 1) % numT;
+      }
+      lastNavTime = now;
+      Serial.printf("[Nav] Col %d tile → %d\n", c, currentTile[c]);
+      return;
+    }
+  }
 }
 
 // =============================================================
@@ -812,10 +1628,9 @@ void setup() {
   Wire1.begin(I2C_SDA, I2C_SCL);      // Bus 1: peripherals (has TCA9554)
   delay(20);                           // Let TCA9554 stabilize after power-on
   latchPowerOn();
-  sampleBatteryOnce(); // Read ADC BEFORE display init — only chance
+  sampleBatteryOnce(); // Initial battery read at boot
 
-#if CRITTER_ENABLED
-  // Init IMU (QMI8658 accelerometer for critter tilt detection)
+  // Init IMU (QMI8658 — used for auto-dim motion detection + critter tilt)
   qmiReady = qmi.begin(Wire1, QMI8658_ADDR, I2C_SDA, I2C_SCL);
   if (qmiReady) {
     qmi.configAccelerometer(SensorQMI8658::ACC_RANGE_4G, SensorQMI8658::ACC_ODR_62_5Hz);
@@ -823,7 +1638,6 @@ void setup() {
     qmi.enableAccelerometer();
     qmi.enableGyroscope();
   }
-#endif
 
   Serial.begin(115200);
   delay(300);
@@ -831,13 +1645,11 @@ void setup() {
   Serial.println("  Desk Status Bar — Booting");
   Serial.println("=============================\n");
 
-#if CRITTER_ENABLED
   if (qmiReady) {
     Serial.println("[IMU] QMI8658 initialized");
   } else {
-    Serial.println("[IMU] QMI8658 not found — critter will use random movement");
+    Serial.println("[IMU] QMI8658 not found — auto-dim disabled");
   }
-#endif
 
   // Power button read pin (GPIO 16) — HIGH when pressed
   // INPUT_PULLDOWN ensures it reads LOW when not pressed
@@ -854,10 +1666,11 @@ void setup() {
   // Canvas buffer stays portrait (172x640) so flush works with QSPI
   gfx->setRotation(ROTATION);
 
-  // Backlight on (active-low: LOW = full brightness)
-  pinMode(LCD_BL_PIN, OUTPUT);
-  digitalWrite(LCD_BL_PIN, LOW);
-  Serial.println("[Backlight] On");
+  // Backlight on via PWM (active-low: 255 = off, 0 = full on)
+  ledcAttach(LCD_BL_PIN, 5000, 8);
+  setBacklight(BRIGHTNESS);
+  lastMotionTime = millis();
+  Serial.println("[Backlight] On (PWM)");
 
   // Splash
   drawSplash("Connecting to WiFi...");
@@ -877,8 +1690,29 @@ void setup() {
   if (wifiConnected) {
     drawSplash("Fetching weather...");
     fetchWeather();
+    fetchAQI();
     lastWeatherFetch = millis();
   }
+
+#if CRITTER_ENABLED
+  // Calibrate resting tilt now that device has been sitting still
+  if (qmiReady) {
+    float sum = 0.0f;
+    int samples = 0;
+    for (int i = 0; i < 20; i++) {
+      IMUdata acc, gyro;
+      if (qmi.getDataReady()) {
+        qmi.getAccelerometer(acc.x, acc.y, acc.z);
+        qmi.getGyroscope(gyro.x, gyro.y, gyro.z);
+        sum += acc.x;
+        samples++;
+      }
+      delay(20);
+    }
+    if (samples > 0) accelBaseX = sum / samples;
+    Serial.printf("[IMU] Calibrated baseline x=%.2f (%d samples)\n", accelBaseX, samples);
+  }
+#endif
 
   drawSplash("Ready!");
   delay(400);
@@ -892,8 +1726,17 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
-  // Update clock display every second
-  if (now - lastClockUpdate >= CLOCK_INTERVAL) {
+  // Read IMU + update auto-dim (before draw so motion restores brightness immediately)
+  readIMU();
+  updateAutoDim();
+
+  // Redraw display — faster when critter is enabled for smooth animation
+#if CRITTER_ENABLED
+  static const unsigned long drawInterval = 150;  // ~7fps
+#else
+  static const unsigned long drawInterval = CLOCK_INTERVAL;
+#endif
+  if (now - lastClockUpdate >= drawInterval) {
     lastClockUpdate = now;
     drawMainPanel();
   }
@@ -902,7 +1745,14 @@ void loop() {
   if (wifiConnected && (now - lastWeatherFetch >= WEATHER_INTERVAL)) {
     Serial.println("[Loop] Refreshing weather...");
     fetchWeather();
+    fetchAQI();
     lastWeatherFetch = now;
+  }
+
+  // Refresh battery voltage periodically
+  if (now - lastBatteryRead >= 60000) {
+    sampleBatteryOnce();
+    lastBatteryRead = now;
   }
 
   // Reconnect WiFi if dropped
@@ -925,6 +1775,7 @@ void loop() {
     if (pwrDown && !pwrBtnWasDown) {
       pwrBtnDownAt = now;
       pwrBtnWasDown = true;
+      lastMotionTime = now;
     } else if (!pwrDown) {
       pwrBtnWasDown = false;
     } else if (pwrDown && pwrBtnWasDown && (now - pwrBtnDownAt >= 3000)) {
@@ -936,13 +1787,28 @@ void loop() {
   TouchPoint tp = readTouch();
   if (tp.pressed && (now - lastTouchTime > TOUCH_DEBOUNCE)) {
     lastTouchTime = now;
-    Serial.printf("[Touch] x=%d y=%d\n", tp.x, tp.y);
+    lastMotionTime = now;
 
-    // Tap anywhere → force weather refresh
-    if (wifiConnected) {
-      drawSplash("Refreshing...");
-      fetchWeather();
-      lastWeatherFetch = now;
+    // Touch coords: tp.x = long axis (0-639, inverted), tp.y = short axis (0-171)
+    int lx = 639 - tp.x;
+    int ly = tp.y;
+    Serial.printf("[Touch] lx=%d ly=%d\n", lx, ly);
+
+    handleTouch(lx, ly, now);
+  }
+
+  // Auto-return to home tiles after inactivity
+  if (AUTO_RETURN_MIN > 0 && lastNavTime > 0) {
+    unsigned long autoReturnMs = (unsigned long)AUTO_RETURN_MIN * 60UL * 1000UL;
+    if (now - lastNavTime >= autoReturnMs) {
+      bool wasAway = (currentPage != 0);
+      for (int c = 0; c < NUM_COLUMNS; c++) {
+        if (currentTile[c] != 0) wasAway = true;
+        currentTile[c] = 0;
+      }
+      currentPage = 0;
+      lastNavTime = 0;
+      if (wasAway) Serial.println("[Nav] Auto-return to home");
     }
   }
 
