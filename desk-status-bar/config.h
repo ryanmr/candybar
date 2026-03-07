@@ -59,7 +59,7 @@
 #define DIM_TIMEOUT_MIN  5        // minutes of no motion before dimming
 #endif
 #ifndef DIM_BRIGHTNESS
-#define DIM_BRIGHTNESS   60       // ~24% brightness when dimmed (below ~50 the backlight may turn fully off)
+#define DIM_BRIGHTNESS   100      // 100–150 works; below ~100 the backlight goes fully black
 #endif
 
 // -- Update Intervals (milliseconds) --

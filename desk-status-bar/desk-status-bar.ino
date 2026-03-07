@@ -549,7 +549,9 @@ void readIMU() {
 void setBacklight(uint8_t brightness) {
   currentBrightness = brightness;
   // Active-low: 0 = full on, 255 = off
-  ledcWrite(LCD_BL_PIN, 255 - brightness);
+  uint8_t duty = 255 - brightness;
+  ledcWrite(LCD_BL_PIN, duty);
+  Serial.printf("[Backlight] brightness=%d duty=%d\n", brightness, duty);
 }
 
 void updateAutoDim() {
@@ -2049,7 +2051,8 @@ void setup() {
   gfx->setRotation(ROTATION);
 
   // Backlight on via PWM (active-low: 255 = off, 0 = full on)
-  ledcAttach(LCD_BL_PIN, 5000, 8);
+  // 1000Hz works better than 5000Hz for partial duty-cycle dimming
+  ledcAttach(LCD_BL_PIN, 1000, 8);
   setBacklight(BRIGHTNESS);
   lastMotionTime = millis();
   Serial.println("[Backlight] On (PWM)");
