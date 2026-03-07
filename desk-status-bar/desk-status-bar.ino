@@ -642,6 +642,93 @@ void drawCritter() {
 }
 
 // =============================================================
+// Sun Arc — visual sunrise/sunset timeline
+// =============================================================
+void drawSunArc(int panelX, int arcCY) {
+  if (weather.sunrise == 0 || weather.sunset == 0) return;
+
+  long tzOffset = (long)UTC_OFFSET * 3600 + (long)DST_OFFSET * 3600;
+  unsigned long localNow = (unsigned long)time(nullptr) + tzOffset;
+  unsigned long rise = weather.sunrise + tzOffset;
+  unsigned long set  = weather.sunset  + tzOffset;
+
+  int arcW = 150;
+  int arcH = 28;
+  int arcX = panelX + 13; // center arc in 176px panel
+  int segments = 30;
+
+  bool isDaytime = (localNow >= rise && localNow < set);
+  float progress;
+
+  if (isDaytime) {
+    progress = (float)(localNow - rise) / (float)(set - rise);
+  } else {
+    // Nighttime: progress across the night
+    unsigned long nightStart, nightEnd;
+    if (localNow >= set) {
+      nightStart = set;
+      nightEnd = rise + 86400; // next sunrise
+    } else {
+      nightStart = set - 86400; // previous sunset
+      nightEnd = rise;
+    }
+    progress = (float)(localNow - nightStart) / (float)(nightEnd - nightStart);
+  }
+  progress = constrain(progress, 0.0f, 1.0f);
+
+  // Draw arc: upward dome for day, downward dome for night
+  for (int i = 0; i < segments; i++) {
+    float a1 = PI * (float)i / segments;
+    float a2 = PI * (float)(i + 1) / segments;
+    int x1 = arcX + (int)(a1 / PI * arcW);
+    int y1, y2;
+    int x2 = arcX + (int)(a2 / PI * arcW);
+    if (isDaytime) {
+      y1 = arcCY - (int)(sinf(a1) * arcH);
+      y2 = arcCY - (int)(sinf(a2) * arcH);
+    } else {
+      y1 = arcCY + (int)(sinf(a1) * arcH);
+      y2 = arcCY + (int)(sinf(a2) * arcH);
+    }
+    gfx->drawLine(x1, y1, x2, y2, TEXT_DIM);
+  }
+
+  // Dot position along arc
+  float dotAngle = PI * progress;
+  int dotX = arcX + (int)(dotAngle / PI * arcW);
+  int dotY;
+  if (isDaytime) {
+    dotY = arcCY - (int)(sinf(dotAngle) * arcH);
+  } else {
+    dotY = arcCY + (int)(sinf(dotAngle) * arcH);
+  }
+  uint16_t dotColor = isDaytime ? WARN_COLOR : TEXT_SECONDARY;
+  gfx->fillCircle(dotX, dotY, 3, dotColor);
+
+  // Time labels at endpoints
+  int riseH = (rise % 86400) / 3600;
+  int riseM = ((rise % 86400) % 3600) / 60;
+  int setH  = (set % 86400) / 3600;
+  int setM  = ((set % 86400) % 3600) / 60;
+
+  // Convert to 12h
+  int rH = riseH % 12; if (rH == 0) rH = 12;
+  int sH = setH % 12;  if (sH == 0) sH = 12;
+
+  char rBuf[8], sBuf[8];
+  snprintf(rBuf, sizeof(rBuf), "%d:%02d", rH, riseM);
+  snprintf(sBuf, sizeof(sBuf), "%d:%02d", sH, setM);
+
+  gfx->setTextColor(TEXT_DIM);
+  gfx->setTextSize(1);
+  gfx->setCursor(arcX, arcCY + 6);
+  gfx->print(rBuf);
+  int sLen = strlen(sBuf) * 6;
+  gfx->setCursor(arcX + arcW - sLen, arcCY + 6);
+  gfx->print(sBuf);
+}
+
+// =============================================================
 // Main Panel (0) — Time | Date | Weather | Battery
 // =============================================================
 void drawMainPanel() {
@@ -689,7 +776,7 @@ void drawMainPanel() {
                           "Thursday", "Friday", "Saturday"};
     gfx->setTextColor(ACCENT_COLOR);
     gfx->setTextSize(2);
-    gfx->setCursor(198, 24);
+    gfx->setCursor(198, 20);
     gfx->print(days[t.tm_wday]);
 
     // Month Day
@@ -699,25 +786,19 @@ void drawMainPanel() {
     snprintf(dateBuf, sizeof(dateBuf), "%s %d", months[t.tm_mon], t.tm_mday);
     gfx->setTextColor(TEXT_PRIMARY);
     gfx->setTextSize(2);
-    gfx->setCursor(198, 52);
+    gfx->setCursor(198, 44);
     gfx->print(dateBuf);
 
-    // Year — same size as date, slightly off-white
+    // Year
     char yearBuf[6];
     snprintf(yearBuf, sizeof(yearBuf), "%d", t.tm_year + 1900);
     gfx->setTextColor(TEXT_SECONDARY);
     gfx->setTextSize(2);
-    gfx->setCursor(198, 80);
+    gfx->setCursor(198, 68);
     gfx->print(yearBuf);
 
-    // Week number — same size as date, slightly off-white
-    int weekNum = (t.tm_yday + 7 - ((t.tm_wday + 6) % 7)) / 7;
-    char weekBuf[12];
-    snprintf(weekBuf, sizeof(weekBuf), "Week %d", weekNum);
-    gfx->setTextColor(TEXT_SECONDARY);
-    gfx->setTextSize(2);
-    gfx->setCursor(198, 108);
-    gfx->print(weekBuf);
+    // Sun arc timeline
+    drawSunArc(186, 115);
   }
 
   // ── WEATHER SECTION (x: 370–526) ──────────────────────
