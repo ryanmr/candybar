@@ -101,9 +101,10 @@ struct WeatherData {
 
 WeatherData weather = { 0, 0, 0, "loading...", "01d", false };
 
-unsigned long lastWeatherFetch = 0;
-unsigned long lastClockUpdate  = 0;
-unsigned long lastTouchTime    = 0;
+unsigned long lastWeatherFetch  = 0;
+unsigned long lastClockUpdate   = 0;
+unsigned long lastTouchTime     = 0;
+unsigned long lastBatteryRead   = 0;
 int  currentPanel = 0;   // 0 = main, 1 = detail, 2 = system info
 bool wifiConnected = false;
 bool timeSynced    = false;
@@ -305,9 +306,7 @@ void fetchWeather() {
 
 // =============================================================
 // Battery Voltage
-// Read ADC ONCE at boot before display init, then never again.
-// ADC1 conflicts with QSPI display pins, so we sample early
-// and cache the result. Updated only on reboot.
+// Sampled at boot and refreshed every 60 seconds in loop().
 // =============================================================
 float cachedBatteryVoltage = 0.0f;
 
@@ -323,7 +322,7 @@ void sampleBatteryOnce() {
   // Disable divider to reduce power drain
   tca9554SetPin(TCA9554_ADC_EN, true);
 
-  Serial.printf("[Battery] One-shot read: %dmV raw, %.2fV battery\n", mv, cachedBatteryVoltage);
+  Serial.printf("[Battery] Read: %dmV raw, %.2fV battery\n", mv, cachedBatteryVoltage);
 }
 
 float getBatteryVoltage() {
@@ -845,7 +844,7 @@ void setup() {
   Wire1.begin(I2C_SDA, I2C_SCL);      // Bus 1: peripherals (has TCA9554)
   delay(20);                           // Let TCA9554 stabilize after power-on
   latchPowerOn();
-  sampleBatteryOnce(); // Read ADC BEFORE display init — only chance
+  sampleBatteryOnce(); // Initial battery read at boot
 
 #if CRITTER_ENABLED
   // Init IMU (QMI8658 accelerometer for critter tilt detection)
@@ -961,6 +960,12 @@ void loop() {
     Serial.println("[Loop] Refreshing weather...");
     fetchWeather();
     lastWeatherFetch = now;
+  }
+
+  // Refresh battery voltage periodically
+  if (now - lastBatteryRead >= 60000) {
+    sampleBatteryOnce();
+    lastBatteryRead = now;
   }
 
   // Reconnect WiFi if dropped
