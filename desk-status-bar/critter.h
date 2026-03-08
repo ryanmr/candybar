@@ -47,7 +47,12 @@ void updateCritter() {
       } else if (random(700) < 5) {
         critterState = CRIT_JUMPING;
         critterStateTicks = 0;
-        critterVY = 1.2f;
+        critterVY = 3.0f;
+        critterIdleTicks = 0;
+      } else if (random(700) < 2) {
+        critterState = CRIT_FLYING;
+        critterStateTicks = 0;
+        critterVY = 2.5f;
         critterIdleTicks = 0;
       } else if (random(700) < 3) {
         critterState = CRIT_WAVING;
@@ -81,13 +86,37 @@ void updateCritter() {
       if (random(700) < 8) {
         critterState = CRIT_JUMPING;
         critterStateTicks = 0;
-        critterVY = 1.2f;
+        critterVY = 3.0f;
+      } else if (random(700) < 3) {
+        critterState = CRIT_FLYING;
+        critterStateTicks = 0;
+        critterVY = 2.5f;
       }
       break;
 
     case CRIT_JUMPING:
       critterY += critterVY;
       critterVY -= 0.3f;  // gravity scaled for 7fps
+      if (critterY <= 0) {
+        critterY = 0;
+        critterVY = 0;
+        critterState = tilting ? CRIT_WALKING : CRIT_IDLE;
+        critterStateTicks = 0;
+      }
+      break;
+
+    case CRIT_FLYING:
+      // Sustained flight: flap upward for first ~28 ticks (~4s), then glide down
+      if (critterStateTicks < 28) {
+        // Flap: small upward boost each tick to stay airborne
+        critterVY += 0.15f;
+        critterVY = constrain(critterVY, -2.0f, 2.5f);
+      }
+      critterY += critterVY;
+      critterVY -= 0.18f;  // lighter gravity while flying
+      // Drift horizontally
+      critterVX += critterDir * 0.3f;
+      critterVX = constrain(critterVX, -2.5f, 2.5f);
       if (critterY <= 0) {
         critterY = 0;
         critterVY = 0;
@@ -162,7 +191,7 @@ void drawCritter() {
   // Wing — overlapping circle on body, deeper blue
   int wx = cx - dir * 2;
   int wy = cy - 1;
-  if (critterState == CRIT_JUMPING || critterState == CRIT_WAVING) {
+  if (critterState == CRIT_JUMPING || critterState == CRIT_WAVING || critterState == CRIT_FLYING) {
     // Wing raised — shifted up
     int wingWiggle = ((critterAnimTick / 4) % 2 == 0) ? -3 : 0;
     gfx->fillCircle(wx, wy - 5 + wingWiggle, 4, CRITTER_WING);
