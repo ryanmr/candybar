@@ -167,6 +167,8 @@ void drawSunArc(int panelX, int arcCY) {
   progress = constrain(progress, 0.0f, 1.0f);
 
   // Draw arc: upward dome for day, downward dome for night
+  // Night arc is shifted up so its lowest point sits at arcCY (same baseline as day)
+  int nightBaseY = arcCY - arcH + 3;
   for (int i = 0; i < segments; i++) {
     float a1 = PI * (float)i / segments;
     float a2 = PI * (float)(i + 1) / segments;
@@ -177,8 +179,8 @@ void drawSunArc(int panelX, int arcCY) {
       y1 = arcCY - (int)(sinf(a1) * arcH);
       y2 = arcCY - (int)(sinf(a2) * arcH);
     } else {
-      y1 = arcCY + (int)(sinf(a1) * arcH);
-      y2 = arcCY + (int)(sinf(a2) * arcH);
+      y1 = nightBaseY + (int)(sinf(a1) * arcH);
+      y2 = nightBaseY + (int)(sinf(a2) * arcH);
     }
     gfx->drawLine(x1, y1, x2, y2, TEXT_SECONDARY);
   }
@@ -190,7 +192,7 @@ void drawSunArc(int panelX, int arcCY) {
   if (isDaytime) {
     dotY = arcCY - (int)(sinf(dotAngle) * arcH);
   } else {
-    dotY = arcCY + (int)(sinf(dotAngle) * arcH);
+    dotY = nightBaseY + (int)(sinf(dotAngle) * arcH);
   }
   uint16_t dotColor = isDaytime ? WARN_COLOR : TEXT_SECONDARY;
   gfx->fillCircle(dotX, dotY, 3, dotColor);
