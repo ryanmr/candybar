@@ -28,7 +28,7 @@ struct WeatherData {
 
 // Navigation — tile-per-column + page switching
 #define NUM_COLUMNS  4
-#define NUM_PAGES    2
+#define NUM_PAGES    1
 
 struct ColGeom { int16_t x; int16_t w; uint8_t numTiles; };
 static const ColGeom COL_GEOM[NUM_COLUMNS] = {
