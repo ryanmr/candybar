@@ -121,6 +121,10 @@ unsigned long critterEdgeTime = 0;  // when critter first entered edge zone
 bool critterInEdge = false;
 int critterDirTicks = 0;           // ticks spent walking in current direction
 
+// -- Power source state --
+bool usbPowered = false;             // true when running on USB/AC power
+bool batteryCharging = false;         // true when ETA6098 is actively charging
+
 // -- Touch focus ring state --
 int8_t focusCol = -1;                // which column was last tapped (-1 = none)
 unsigned long focusTouchTime = 0;    // when the focus ring was triggered
@@ -153,6 +157,7 @@ void setup() {
   delay(20);                           // Let TCA9554 stabilize after power-on
   latchPowerOn();
   sampleBatteryOnce(); // Initial battery read at boot
+  updatePowerState();  // Detect USB vs battery power
 
   // Init IMU (QMI8658 — used for auto-dim motion detection + critter tilt)
   qmiReady = qmi.begin(Wire1, QMI8658_ADDR, I2C_SDA, I2C_SCL);
@@ -290,9 +295,10 @@ void loop() {
     lastWeatherFetch = now;
   }
 
-  // Refresh battery voltage periodically
+  // Refresh battery voltage + power state periodically
   if (now - lastBatteryRead >= 60000) {
     sampleBatteryOnce();
+    updatePowerState();
     lastBatteryRead = now;
   }
 

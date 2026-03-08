@@ -58,6 +58,7 @@
 // -- TCA9554 I/O Expander Pin Assignments --
 #define TCA9554_ADC_EN   1      // LOW = enable battery voltage divider
 #define TCA9554_PWR_PIN  6      // HIGH = power latch on, LOW = power off
+#define TCA9554_CHRG_STAT 5     // ETA6098 STAT: LOW = charging (input, open-drain)
 #define TCA9554_PA_EN    7      // HIGH = enable speaker amplifier
 
 // -- Display Dimensions --

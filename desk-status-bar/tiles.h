@@ -413,6 +413,14 @@ void drawStatusTile0(int px, int py, int pw, int ph) {
     char batBuf[8];
     snprintf(batBuf, sizeof(batBuf), "%d%%", batPct);
     gfx->print(batBuf);
+
+    // Lightning bolt when on USB/AC power
+    if (usbPowered) {
+      int bx = gfx->getCursorX() + 4;
+      int by = py + 50;
+      gfx->fillTriangle(bx + 4, by, bx + 10, by, bx + 2, by + 9, WARN_COLOR);
+      gfx->fillTriangle(bx + 1, by + 7, bx + 7, by + 7, bx - 1, by + 16, WARN_COLOR);
+    }
   } else {
     gfx->setTextColor(TEXT_DIM);
     gfx->print("Bat --");

@@ -114,6 +114,24 @@ int getBatteryPercent(float voltage) {
 }
 
 // =============================================================
+// Power Source Detection
+// GPIO 16 LOW = USB power, HIGH = battery power
+// TCA9554 P5 (ETA6098 STAT): LOW = charging, HIGH = not charging
+// =============================================================
+void updatePowerState() {
+  usbPowered = (digitalRead(BTN_PWR_READ) == LOW);
+
+  // Read charger STAT on TCA9554 P5 (ensure it's configured as input)
+  uint8_t config = tca9554ReadReg(TCA_REG_CONFIG);
+  if (!(config & (1 << TCA9554_CHRG_STAT))) {
+    config |= (1 << TCA9554_CHRG_STAT);
+    tca9554WriteReg(TCA_REG_CONFIG, config);
+  }
+  uint8_t input = tca9554ReadReg(0x00);  // TCA_REG_INPUT
+  batteryCharging = !(input & (1 << TCA9554_CHRG_STAT));
+}
+
+// =============================================================
 // Auto-Dim
 // =============================================================
 void updateAutoDim() {
