@@ -89,11 +89,13 @@ void drawDateTile0(int px, int py, int pw, int ph, struct tm* t) {
   gfx->setCursor(px + 12, py + 60);
   gfx->print(yearBuf);
 
-  // Day of year / days remaining
-  char doyBuf[16];
+  // Week number + day of year / days remaining
   int doy = t->tm_yday + 1;
   int daysLeft = (((t->tm_year + 1900) % 4 == 0) ? 366 : 365) - doy;
-  snprintf(doyBuf, sizeof(doyBuf), "Day %d (-%d)", doy, daysLeft);
+  int week = (t->tm_yday + 7 - ((t->tm_wday + 6) % 7)) / 7;  // ISO week approx
+
+  char doyBuf[24];
+  snprintf(doyBuf, sizeof(doyBuf), "W%d  Day %d (-%d)", week, doy, daysLeft);
   gfx->setTextColor(TEXT_DIM);
   gfx->setTextSize(1);
   gfx->setCursor(px + 12, py + 88);
@@ -414,12 +416,21 @@ void drawStatusTile0(int px, int py, int pw, int ph) {
     snprintf(batBuf, sizeof(batBuf), "%d%%", batPct);
     gfx->print(batBuf);
 
-    // Lightning bolt when on USB/AC power
+    // Power indicator when on USB/AC
     if (usbPowered) {
       int bx = gfx->getCursorX() + 4;
       int by = py + 50;
-      gfx->fillTriangle(bx + 4, by, bx + 10, by, bx + 2, by + 9, WARN_COLOR);
-      gfx->fillTriangle(bx + 1, by + 7, bx + 7, by + 7, bx - 1, by + 16, WARN_COLOR);
+      if (batteryCharging) {
+        // Lightning bolt — actively charging
+        gfx->fillTriangle(bx + 4, by, bx + 10, by, bx + 2, by + 9, WARN_COLOR);
+        gfx->fillTriangle(bx + 1, by + 7, bx + 7, by + 7, bx - 1, by + 16, WARN_COLOR);
+      } else {
+        // Checkmark — plugged in, fully charged
+        gfx->drawLine(bx, by + 10, bx + 4, by + 14, GOOD_COLOR);
+        gfx->drawLine(bx + 4, by + 14, bx + 10, by + 4, GOOD_COLOR);
+        gfx->drawLine(bx, by + 11, bx + 4, by + 15, GOOD_COLOR);
+        gfx->drawLine(bx + 4, by + 15, bx + 10, by + 5, GOOD_COLOR);
+      }
     }
   } else {
     gfx->setTextColor(TEXT_DIM);

@@ -29,6 +29,7 @@
 #include <Wire.h>
 #include <Preferences.h>
 #include <SensorQMI8658.hpp>
+#include <SensorPCF85063.hpp>
 
 // Use SPI3_HOST for QSPI display (matches Waveshare reference design)
 #define ESP32QSPI_SPI_HOST SPI3_HOST
@@ -89,6 +90,10 @@ bool timeSynced    = false;
 unsigned long pwrBtnDownAt = 0;  // millis when power button was first pressed
 bool pwrBtnWasDown = false;
 bool pwrBtnReady   = false;     // true once we've seen a LOW reading (button released)
+
+// -- RTC (PCF85063 — keeps time across reboots) --
+SensorPCF85063 rtc;
+bool rtcReady = false;
 
 // -- IMU (QMI8658 accelerometer — used for critter tilt + auto-dim) --
 SensorQMI8658 qmi;
@@ -159,6 +164,13 @@ void setup() {
   sampleBatteryOnce(); // Initial battery read at boot
   updatePowerState();  // Detect USB vs battery power
 
+  // Init RTC (PCF85063 — provides time before WiFi/NTP is available)
+  rtcReady = rtc.begin(Wire1, I2C_SDA, I2C_SCL);
+  if (rtcReady && rtc.isClockIntegrityGuaranteed()) {
+    // Set ESP32 system clock from RTC so time is available immediately
+    rtc.hwClockRead();
+  }
+
   // Init IMU (QMI8658 — used for auto-dim motion detection + critter tilt)
   qmiReady = qmi.begin(Wire1, QMI8658_ADDR, I2C_SDA, I2C_SCL);
   if (qmiReady) {
@@ -173,6 +185,19 @@ void setup() {
   Serial.println("\n=============================");
   Serial.println("  Desk Status Bar — Booting");
   Serial.println("=============================\n");
+
+  if (rtcReady) {
+    if (rtc.isClockIntegrityGuaranteed()) {
+      RTC_DateTime now = rtc.getDateTime();
+      Serial.printf("[RTC] PCF85063 ready — %04d-%02d-%02d %02d:%02d:%02d\n",
+        now.getYear(), now.getMonth(), now.getDay(),
+        now.getHour(), now.getMinute(), now.getSecond());
+    } else {
+      Serial.println("[RTC] PCF85063 found but oscillator was stopped — needs NTP sync");
+    }
+  } else {
+    Serial.println("[RTC] PCF85063 not found");
+  }
 
   if (qmiReady) {
     Serial.println("[IMU] QMI8658 initialized");
@@ -217,6 +242,11 @@ void setup() {
   if (wifiConnected) {
     drawSplash("Syncing time...");
     syncTime();
+    // Save NTP time to RTC for next boot
+    if (rtcReady) {
+      rtc.hwClockWrite();
+      Serial.println("[RTC] Synced from NTP");
+    }
   }
 
   // Initial weather fetch — skip if cache is still fresh (saves API hits during dev)
