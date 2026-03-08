@@ -136,6 +136,16 @@ void updatePowerState() {
 // =============================================================
 void updateAutoDim() {
   if (!qmiReady) return;
+  // Never dim on USB power — not draining battery
+  if (usbPowered) {
+    if (backlightDimmed) {
+      backlightDimmed = false;
+      setBacklight(BRIGHTNESS);
+      Serial.println("[Dim] USB power detected, restoring brightness");
+    }
+    lastMotionTime = millis();
+    return;
+  }
   unsigned long now = millis();
 
   // Check for motion: delta against previous reading
