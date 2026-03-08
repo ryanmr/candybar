@@ -474,7 +474,16 @@ void drawWeatherTile2(int px, int py, int pw, int ph) {
 // ── STATUS tile 0: WiFi + Battery + Uptime ──────────────────
 void drawStatusTile0(int px, int py, int pw, int ph) {
   // WiFi signal bars
-  if (wifiConnected) {
+  if (wifiRadioOff) {
+    // WiFi intentionally off for power saving — show sleep indicator
+    gfx->setTextColor(TEXT_DIM);
+    gfx->setTextSize(2);
+    gfx->setCursor(px + 10, py + 8);
+    gfx->print("WiFi");
+    gfx->setTextSize(1);
+    gfx->setCursor(px + 10, py + 30);
+    gfx->print("zzz");
+  } else if (wifiConnected && WiFi.status() == WL_CONNECTED) {
     int rssi = WiFi.RSSI();
     drawWifiSignalBars(px + 10, py + 8, rssi);
     // Small dBm label below bars

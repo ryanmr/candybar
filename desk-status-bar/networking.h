@@ -24,6 +24,42 @@ void setupWiFi() {
 }
 
 // =============================================================
+// WiFi Power Cycling
+// =============================================================
+void disconnectWiFi() {
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+  wifiRadioOff = true;
+  wifiOffSince = millis();
+  Serial.println("[WiFi] Radio off");
+}
+
+bool reconnectWiFi() {
+  Serial.println("[WiFi] Reconnecting...");
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(500);
+    attempts++;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    wifiRadioOff = false;
+    wifiConnected = true;
+    Serial.printf("[WiFi] Reconnected! IP: %s\n", WiFi.localIP().toString().c_str());
+    return true;
+  }
+
+  // Failed — turn radio back off to save power
+  Serial.println("[WiFi] Reconnect failed, radio off");
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+  return false;
+}
+
+// =============================================================
 // NTP Time
 // =============================================================
 void syncTime() {

@@ -134,22 +134,20 @@ void updatePowerState() {
 }
 
 // =============================================================
-// Auto-Dim
+// Day/Night Detection
 // =============================================================
-void updateAutoDim() {
-  if (!qmiReady) return;
-  // Never dim on USB power — not draining battery
-  if (usbPowered) {
-    if (backlightDimmed) {
-      backlightDimmed = false;
-      setBacklight(BRIGHTNESS);
-      Serial.println("[Dim] USB power detected, restoring brightness");
-    }
-    return;
-  }
-  unsigned long now = millis();
+bool isNighttime() {
+  struct tm t;
+  if (!getLocalTime(&t, 0)) return false;  // fallback: daytime
+  return (t.tm_hour < NIGHT_END_HOUR || t.tm_hour >= NIGHT_START_HOUR);
+}
 
-  // Check for motion: delta against previous reading (squared to avoid sqrtf)
+// =============================================================
+// Motion Detection (extracted from former updateAutoDim)
+// =============================================================
+void checkMotion() {
+  if (!qmiReady) return;
+
   float dx = lastAccX - prevAccX;
   float dy = lastAccY - prevAccY;
   float dz = lastAccZ - prevAccZ;
@@ -159,19 +157,92 @@ void updateAutoDim() {
   prevAccZ = lastAccZ;
 
   if (deltaSq > MOTION_THRESHOLD * MOTION_THRESHOLD) {
-    lastMotionTime = now;
-    if (backlightDimmed) {
-      backlightDimmed = false;
-      setBacklight(BRIGHTNESS);
-      Serial.println("[Dim] Motion detected, restoring brightness");
-    }
+    lastMotionTime = millis();
+  }
+}
+
+// =============================================================
+// Power Mode Resolution — pure function
+// =============================================================
+PowerMode resolvePowerMode() {
+  // USB power bypasses all power saving
+  if (usbPowered) return PWR_ACTIVE;
+
+  unsigned long now = millis();
+  unsigned long idleMs = now - lastMotionTime;
+  unsigned long dimMs = (unsigned long)DIM_TIMEOUT_MIN * 60UL * 1000UL;
+  unsigned long deepMs = (unsigned long)DEEP_IDLE_TIMEOUT_MIN * 60UL * 1000UL;
+  bool night = isNighttime();
+
+  if (wifiAwayMode) return PWR_AWAY;
+
+  if (idleMs < dimMs) {
+    return night ? PWR_ACTIVE_NIGHT : PWR_ACTIVE;
   }
 
-  // Dim after timeout
-  unsigned long dimTimeoutMs = (unsigned long)DIM_TIMEOUT_MIN * 60UL * 1000UL;
-  if (!backlightDimmed && (now - lastMotionTime >= dimTimeoutMs)) {
-    backlightDimmed = true;
-    setBacklight(DIM_BRIGHTNESS);
-    Serial.println("[Dim] No motion, dimming backlight");
+  if (idleMs < deepMs) {
+    return night ? PWR_IDLE_NIGHT : PWR_IDLE_DAY;
+  }
+
+  return night ? PWR_DEEP_NIGHT : PWR_DEEP_DAY;
+}
+
+// =============================================================
+// Power Mode Application — sets brightness, draw interval, logs
+// =============================================================
+const char* powerModeName(PowerMode m) {
+  switch (m) {
+    case PWR_ACTIVE:       return "ACTIVE";
+    case PWR_ACTIVE_NIGHT: return "ACTIVE_NIGHT";
+    case PWR_IDLE_DAY:     return "IDLE_DAY";
+    case PWR_IDLE_NIGHT:   return "IDLE_NIGHT";
+    case PWR_DEEP_DAY:     return "DEEP_DAY";
+    case PWR_DEEP_NIGHT:   return "DEEP_NIGHT";
+    case PWR_AWAY:         return "AWAY";
+    default:               return "UNKNOWN";
+  }
+}
+
+void applyPowerMode(PowerMode newMode, PowerMode prevMode) {
+  if (newMode == prevMode) return;
+
+  Serial.printf("[Power] %s -> %s\n", powerModeName(prevMode), powerModeName(newMode));
+
+  switch (newMode) {
+    case PWR_ACTIVE:
+      setBacklight(BRIGHTNESS);
+      drawInterval = 150;
+      wifiReconnectInterval = 0;
+      break;
+    case PWR_ACTIVE_NIGHT:
+      setBacklight(DIM_BRIGHTNESS);
+      drawInterval = 150;
+      wifiReconnectInterval = 0;
+      break;
+    case PWR_IDLE_DAY:
+      setBacklight(DIM_BRIGHTNESS_DAY);
+      drawInterval = 150;
+      wifiReconnectInterval = 0;
+      break;
+    case PWR_IDLE_NIGHT:
+      setBacklight(DIM_BRIGHTNESS);
+      drawInterval = 150;
+      wifiReconnectInterval = 0;
+      break;
+    case PWR_DEEP_DAY:
+      setBacklight(DIM_BRIGHTNESS_DAY);
+      drawInterval = DEEP_DAY_DRAW_INTERVAL;
+      wifiReconnectInterval = WIFI_CYCLE_DAY_MS;
+      break;
+    case PWR_DEEP_NIGHT:
+      setBacklight(DIM_BRIGHTNESS);
+      drawInterval = DEEP_NIGHT_DRAW_INTERVAL;
+      wifiReconnectInterval = WIFI_CYCLE_NIGHT_MS + (esp_random() % WIFI_CYCLE_JITTER_MS);
+      break;
+    case PWR_AWAY:
+      setBacklight(DIM_BRIGHTNESS);
+      drawInterval = DEEP_NIGHT_DRAW_INTERVAL;
+      wifiReconnectInterval = WIFI_AWAY_INTERVAL_MS;
+      break;
   }
 }

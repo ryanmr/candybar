@@ -103,10 +103,17 @@ float lastAccX = 0.0f, lastAccY = 0.0f, lastAccZ = 0.0f;
 float accelBaseX = 0.0f;       // resting tilt offset (calibrated at boot)
 #endif
 
-// -- Auto-dim state --
+// -- Motion + power management state --
 unsigned long lastMotionTime = 0;
 float prevAccX = 0.0f, prevAccY = 0.0f, prevAccZ = 0.0f;
-bool  backlightDimmed = false;
+PowerMode currentPowerMode = PWR_ACTIVE;
+unsigned long drawInterval = 150;         // dynamic (active = 150ms / ~7fps)
+bool wifiRadioOff = false;
+unsigned long wifiOffSince = 0;
+unsigned long wifiReconnectInterval = 0;  // 0 = no cycling
+bool wifiAwayMode = false;
+unsigned long wifiAwayStart = 0;
+unsigned long lastWifiCycleTime = 0;
 
 // -- Critter pet state --
 CritterState critterState = CRIT_IDLE;
@@ -296,28 +303,33 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
-  // Read IMU + update auto-dim (before draw so motion restores brightness immediately)
+  // Read IMU + detect motion (before draw so motion restores brightness immediately)
   readIMU();
-  updateAutoDim();
+  checkMotion();
 
-  // Redraw display — faster when critter is enabled for smooth animation
-#if CRITTER_ENABLED
-  static const unsigned long drawInterval = 150;  // ~7fps
-#else
-  static const unsigned long drawInterval = CLOCK_INTERVAL;
-#endif
+  // Resolve and apply power mode
+  PowerMode newMode = resolvePowerMode();
+  if (newMode != currentPowerMode) {
+    PowerMode prevMode = currentPowerMode;
+    currentPowerMode = newMode;
+    applyPowerMode(newMode, prevMode);
+
+    // Waking up from deep/away → reconnect WiFi immediately
+    if ((prevMode == PWR_DEEP_DAY || prevMode == PWR_DEEP_NIGHT || prevMode == PWR_AWAY) &&
+        (newMode == PWR_ACTIVE || newMode == PWR_ACTIVE_NIGHT)) {
+      if (wifiRadioOff) {
+        if (reconnectWiFi()) {
+          wifiAwayMode = false;
+          wifiAwayStart = 0;
+        }
+      }
+    }
+  }
+
+  // Redraw display at dynamic interval
   if (now - lastClockUpdate >= drawInterval) {
     lastClockUpdate = now;
     drawMainPanel();
-  }
-
-  // Refresh weather periodically
-  if (wifiConnected && (now - lastWeatherFetch >= WEATHER_INTERVAL)) {
-    Serial.println("[Loop] Refreshing weather...");
-    fetchWeather();
-    fetchAQI();
-    saveWeatherCache();
-    lastWeatherFetch = now;
   }
 
   // Refresh battery voltage + power state periodically
@@ -327,12 +339,71 @@ void loop() {
     lastBatteryRead = now;
   }
 
-  // Reconnect WiFi if dropped
-  if (wifiConnected && WiFi.status() != WL_CONNECTED) {
-    Serial.println("[WiFi] Connection lost, reconnecting...");
-    WiFi.reconnect();
-    delay(5000);
-    wifiConnected = (WiFi.status() == WL_CONNECTED);
+  // WiFi management — mode-dependent
+  if (currentPowerMode == PWR_ACTIVE || currentPowerMode == PWR_ACTIVE_NIGHT ||
+      currentPowerMode == PWR_IDLE_DAY || currentPowerMode == PWR_IDLE_NIGHT) {
+    // Active/idle: keep WiFi on, reconnect if dropped, fetch weather normally
+    if (wifiRadioOff) {
+      reconnectWiFi();
+    } else if (wifiConnected && WiFi.status() != WL_CONNECTED) {
+      Serial.println("[WiFi] Connection lost, reconnecting...");
+      WiFi.reconnect();
+      delay(5000);
+      wifiConnected = (WiFi.status() == WL_CONNECTED);
+    }
+
+    // Normal weather refresh
+    if (wifiConnected && (now - lastWeatherFetch >= WEATHER_INTERVAL)) {
+      Serial.println("[Loop] Refreshing weather...");
+      fetchWeather();
+      fetchAQI();
+      saveWeatherCache();
+      lastWeatherFetch = now;
+    }
+  } else if (currentPowerMode == PWR_DEEP_DAY || currentPowerMode == PWR_DEEP_NIGHT) {
+    // Deep idle: disconnect WiFi, cycle at interval to fetch data
+    if (!wifiRadioOff && wifiConnected) {
+      disconnectWiFi();
+      lastWifiCycleTime = now;
+    }
+
+    if (wifiRadioOff && wifiReconnectInterval > 0 &&
+        (now - lastWifiCycleTime >= wifiReconnectInterval)) {
+      lastWifiCycleTime = now;
+      if (reconnectWiFi()) {
+        // Fetch weather while connected
+        fetchWeather();
+        fetchAQI();
+        saveWeatherCache();
+        lastWeatherFetch = now;
+        disconnectWiFi();
+        wifiAwayMode = false;
+        wifiAwayStart = 0;
+      } else {
+        // Track time without WiFi for away mode detection
+        if (wifiAwayStart == 0) wifiAwayStart = now;
+        if (now - wifiAwayStart >= WIFI_AWAY_THRESHOLD_MS) {
+          wifiAwayMode = true;
+          Serial.println("[Power] WiFi unavailable, entering AWAY mode");
+        }
+      }
+    }
+  } else if (currentPowerMode == PWR_AWAY) {
+    // Away: retry WiFi at longer interval
+    if (wifiReconnectInterval > 0 &&
+        (now - lastWifiCycleTime >= wifiReconnectInterval)) {
+      lastWifiCycleTime = now;
+      if (reconnectWiFi()) {
+        fetchWeather();
+        fetchAQI();
+        saveWeatherCache();
+        lastWeatherFetch = now;
+        disconnectWiFi();
+        wifiAwayMode = false;
+        wifiAwayStart = 0;
+        Serial.println("[Power] WiFi recovered, clearing AWAY mode");
+      }
+    }
   }
 
   // Handle power button long-press (3 seconds → power off)

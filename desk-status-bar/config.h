@@ -68,6 +68,42 @@
 #define POWER_OFF_HOLD_MS 3000    // hold power button this long to shut down
 #endif
 
+// -- Power Saving --
+#ifndef DEEP_IDLE_TIMEOUT_MIN
+#define DEEP_IDLE_TIMEOUT_MIN    10
+#endif
+#ifndef DIM_BRIGHTNESS_DAY
+#define DIM_BRIGHTNESS_DAY       140
+#endif
+// DIM_BRIGHTNESS (100) serves as nighttime brightness
+#ifndef DEEP_DAY_DRAW_INTERVAL
+#define DEEP_DAY_DRAW_INTERVAL   250     // 4fps
+#endif
+#ifndef DEEP_NIGHT_DRAW_INTERVAL
+#define DEEP_NIGHT_DRAW_INTERVAL 1000    // 1fps
+#endif
+#ifndef WIFI_CYCLE_DAY_MS
+#define WIFI_CYCLE_DAY_MS        (2UL * 60 * 1000)
+#endif
+#ifndef WIFI_CYCLE_NIGHT_MS
+#define WIFI_CYCLE_NIGHT_MS      (10UL * 60 * 1000)
+#endif
+#ifndef WIFI_CYCLE_JITTER_MS
+#define WIFI_CYCLE_JITTER_MS     (60UL * 1000)
+#endif
+#ifndef WIFI_AWAY_THRESHOLD_MS
+#define WIFI_AWAY_THRESHOLD_MS   (5UL * 60 * 1000)
+#endif
+#ifndef WIFI_AWAY_INTERVAL_MS
+#define WIFI_AWAY_INTERVAL_MS    (5UL * 60 * 1000)
+#endif
+#ifndef NIGHT_START_HOUR
+#define NIGHT_START_HOUR         22
+#endif
+#ifndef NIGHT_END_HOUR
+#define NIGHT_END_HOUR           6
+#endif
+
 // -- Update Intervals (milliseconds) --
 #ifndef WEATHER_INTERVAL
 #define WEATHER_INTERVAL  (10 * 60 * 1000)  // 10 minutes
