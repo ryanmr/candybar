@@ -69,8 +69,9 @@ void drawMainPanel() {
 
       switch (c) {
         case 0: // Time
-          if (currentTile[0] == 0) drawTimeTile0(px, py, pw, ph, hasTime ? &t : nullptr);
-          else                     drawTimeTile1(px, py, pw, ph);
+          if (currentTile[0] == 0)      drawTimeTile0(px, py, pw, ph, hasTime ? &t : nullptr);
+          else if (currentTile[0] == 1) drawTimeTile1(px, py, pw, ph);
+          else                           drawTimeTile2(px, py, pw, ph, hasTime ? &t : nullptr);
           break;
         case 1: // Date
           if (currentTile[1] == 0)      drawDateTile0(px, py, pw, ph, hasTime ? &t : nullptr);

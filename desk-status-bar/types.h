@@ -32,13 +32,13 @@ struct WeatherData {
 
 struct ColGeom { int16_t x; int16_t w; uint8_t numTiles; };
 static const ColGeom COL_GEOM[NUM_COLUMNS] = {
-  {   8, 170, 2 },  // Time:    tile 0=clock, tile 1=world clocks
+  {   8, 170, 3 },  // Time:    tile 0=clock, tile 1=world clocks, tile 2=tix clock
   { 186, 176, 3 },  // Date:    tile 0=date, tile 1=sun arc, tile 2=moon phase
   { 370, 156, 3 },  // Weather: tile 0=temp/desc, tile 1=AQI, tile 2=weather detail
   { 534,  98, 2 },  // Status:  tile 0=wifi/bat, tile 1=system info
 };
 
-enum CritterState { CRIT_IDLE, CRIT_WALKING, CRIT_JUMPING, CRIT_WAVING, CRIT_SLEEPING };
+enum CritterState { CRIT_IDLE, CRIT_WALKING, CRIT_JUMPING, CRIT_WAVING, CRIT_SLEEPING, CRIT_FLYING };
 
 // Touch focus ring
 #define FOCUS_DURATION_MS 600

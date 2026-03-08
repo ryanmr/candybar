@@ -62,6 +62,92 @@ void drawTimeTile1(int px, int py, int pw, int ph) {
   }
 }
 
+// ── TIME tile 2: Tix Clock ──────────────────────────────────
+void drawTimeTile2(int px, int py, int pw, int ph, struct tm* t) {
+  if (!t) {
+    gfx->setTextColor(TEXT_DIM);
+    gfx->setTextSize(2);
+    gfx->setCursor(px + (pw - 60) / 2, py + 60);
+    gfx->print("--:--");
+    return;
+  }
+
+  int hour12 = formatHour12(t->tm_hour);
+  int digits[4] = {
+    hour12 / 10,  // H tens (0 or 1)
+    hour12 % 10,  // H ones (0-9)
+    t->tm_min / 10,  // M tens (0-5)
+    t->tm_min % 10   // M ones (0-9)
+  };
+  const int cols[4] = { 1, 3, 2, 3 };  // columns per group
+  const int rows = 3;
+
+  const int cellSize = 14;
+  const int cellGap = 2;
+  const int step = cellSize + cellGap;
+  const int groupGap = 6;   // gap between digit groups
+
+  // Total width of all 4 grids + gaps
+  int totalW = 0;
+  for (int g = 0; g < 4; g++) totalW += cols[g] * step - cellGap;
+  totalW += 3 * groupGap;
+  int gridH = rows * step - cellGap;
+
+  int startX = px + (pw - totalW) / 2;
+  int startY = py + 16;
+
+  // Cache lit cells — only reshuffle once per second
+  static bool litCache[4][9] = {};
+  static int8_t lastSec = -1;
+
+  if (t->tm_sec != lastSec) {
+    lastSec = t->tm_sec;
+    for (int g = 0; g < 4; g++) {
+      int numCells = cols[g] * rows;
+      memset(litCache[g], 0, sizeof(litCache[g]));
+
+      uint8_t indices[9];
+      for (int i = 0; i < numCells; i++) indices[i] = i;
+      int toLight = digits[g];
+      for (int i = 0; i < toLight; i++) {
+        int j = i + (esp_random() % (numCells - i));
+        uint8_t tmp = indices[i];
+        indices[i] = indices[j];
+        indices[j] = tmp;
+        litCache[g][indices[i]] = true;
+      }
+    }
+  }
+
+  uint16_t litColor = ACCENT_COLOR;
+  uint16_t unlitColor = gfx->color565(35, 35, 50);
+
+  int gx = startX;
+  for (int g = 0; g < 4; g++) {
+    // Draw cells from cache
+    for (int r = 0; r < rows; r++) {
+      for (int c = 0; c < cols[g]; c++) {
+        int idx = r * cols[g] + c;
+        int cx = gx + c * step;
+        int cy = startY + r * step;
+        uint16_t color = litCache[g][idx] ? litColor : unlitColor;
+        gfx->fillRoundRect(cx, cy, cellSize, cellSize, 3, color);
+      }
+    }
+
+    gx += cols[g] * step - cellGap + groupGap;
+  }
+
+  // Digital time label below grids
+  char label[12];
+  snprintf(label, sizeof(label), "%d:%02d %s", hour12, t->tm_min, t->tm_hour >= 12 ? "PM" : "AM");
+  int labelW = strlen(label) * 6;
+  gfx->setTextColor(TEXT_SECONDARY);
+  gfx->setTextSize(1);
+  gfx->setCursor(px + (pw - labelW) / 2, startY + gridH + 10);
+  gfx->print(label);
+}
+
 // ── DATE tile 0: Day/Month/Year ─────────────────────────────
 void drawDateTile0(int px, int py, int pw, int ph, struct tm* t) {
   if (!t) return;
