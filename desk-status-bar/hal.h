@@ -6,6 +6,7 @@
 // Pin 1: ADC voltage divider enable (LOW = enabled)
 // Pin 6: Battery power latch (HIGH = on, LOW = off)
 // =============================================================
+static const uint8_t TCA_REG_INPUT  = 0x00;
 static const uint8_t TCA_REG_OUTPUT = 0x01;
 static const uint8_t TCA_REG_CONFIG = 0x03;
 
@@ -53,7 +54,6 @@ void latchPowerOn() {
 // Backlight Control (PWM, active-low)
 // =============================================================
 void setBacklight(uint8_t brightness) {
-  currentBrightness = brightness;
   // Active-low: 0 = full on, 255 = off
   uint8_t duty = 255 - brightness;
   ledcWrite(LCD_BL_PIN, duty);
@@ -118,16 +118,18 @@ int getBatteryPercent(float voltage) {
 // GPIO 16 LOW = USB power, HIGH = battery power
 // TCA9554 P5 (ETA6098 STAT): LOW = charging, HIGH = not charging
 // =============================================================
+// Configure TCA9554 P5 (charger STAT) as input — call once in setup()
+void initChargerStatPin() {
+  uint8_t config = tca9554ReadReg(TCA_REG_CONFIG);
+  config |= (1 << TCA9554_CHRG_STAT);
+  tca9554WriteReg(TCA_REG_CONFIG, config);
+}
+
 void updatePowerState() {
   usbPowered = (digitalRead(BTN_PWR_READ) == LOW);
 
-  // Read charger STAT on TCA9554 P5 (ensure it's configured as input)
-  uint8_t config = tca9554ReadReg(TCA_REG_CONFIG);
-  if (!(config & (1 << TCA9554_CHRG_STAT))) {
-    config |= (1 << TCA9554_CHRG_STAT);
-    tca9554WriteReg(TCA_REG_CONFIG, config);
-  }
-  uint8_t input = tca9554ReadReg(0x00);  // TCA_REG_INPUT
+  // Read charger STAT on TCA9554 P5 (configured as input in setup)
+  uint8_t input = tca9554ReadReg(TCA_REG_INPUT);
   batteryCharging = !(input & (1 << TCA9554_CHRG_STAT));
 }
 
@@ -143,21 +145,20 @@ void updateAutoDim() {
       setBacklight(BRIGHTNESS);
       Serial.println("[Dim] USB power detected, restoring brightness");
     }
-    lastMotionTime = millis();
     return;
   }
   unsigned long now = millis();
 
-  // Check for motion: delta against previous reading
+  // Check for motion: delta against previous reading (squared to avoid sqrtf)
   float dx = lastAccX - prevAccX;
   float dy = lastAccY - prevAccY;
   float dz = lastAccZ - prevAccZ;
-  float delta = sqrtf(dx*dx + dy*dy + dz*dz);
+  float deltaSq = dx*dx + dy*dy + dz*dz;
   prevAccX = lastAccX;
   prevAccY = lastAccY;
   prevAccZ = lastAccZ;
 
-  if (delta > 0.15f) {
+  if (deltaSq > MOTION_THRESHOLD * MOTION_THRESHOLD) {
     lastMotionTime = now;
     if (backlightDimmed) {
       backlightDimmed = false;
