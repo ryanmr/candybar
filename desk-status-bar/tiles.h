@@ -91,7 +91,9 @@ void drawDateTile0(int px, int py, int pw, int ph, struct tm* t) {
 
   // Week number + day of year / days remaining
   int doy = t->tm_yday + 1;
-  int daysLeft = (((t->tm_year + 1900) % 4 == 0) ? 366 : 365) - doy;
+  int yr = t->tm_year + 1900;
+  bool leap = (yr % 4 == 0 && yr % 100 != 0) || (yr % 400 == 0);
+  int daysLeft = (leap ? 366 : 365) - doy;
   int week = (t->tm_yday + 7 - ((t->tm_wday + 6) % 7)) / 7;  // ISO week approx
 
   char doyBuf[24];
@@ -116,10 +118,10 @@ void drawDateTile1(int px, int py, int pw, int ph) {
   unsigned long rise = weather.sunrise + tzOffset;
   unsigned long set  = weather.sunset  + tzOffset;
 
-  int riseH = (rise % 86400) / 3600;
-  int riseM = ((rise % 86400) % 3600) / 60;
-  int setH  = (set % 86400) / 3600;
-  int setM  = ((set % 86400) % 3600) / 60;
+  int riseH = (rise % SECS_PER_DAY) / 3600;
+  int riseM = ((rise % SECS_PER_DAY) % 3600) / 60;
+  int setH  = (set % SECS_PER_DAY) / 3600;
+  int setM  = ((set % SECS_PER_DAY) % 3600) / 60;
   int rH = formatHour12(riseH);
   int sH = formatHour12(setH);
 
@@ -140,7 +142,7 @@ void drawDateTile1(int px, int py, int pw, int ph) {
 
   // Day + night length — textSize 2
   unsigned long dayLen = weather.sunset - weather.sunrise;
-  unsigned long nightLen = 86400 - dayLen;
+  unsigned long nightLen = SECS_PER_DAY - dayLen;
   int dlH = dayLen / 3600;
   int dlM = (dayLen % 3600) / 60;
   int nlH = nightLen / 3600;
@@ -421,15 +423,9 @@ void drawStatusTile0(int px, int py, int pw, int ph) {
       int bx = gfx->getCursorX() + 4;
       int by = py + 50;
       if (batteryCharging) {
-        // Lightning bolt — actively charging
-        gfx->fillTriangle(bx + 4, by, bx + 10, by, bx + 2, by + 9, WARN_COLOR);
-        gfx->fillTriangle(bx + 1, by + 7, bx + 7, by + 7, bx - 1, by + 16, WARN_COLOR);
+        drawLightningBolt(bx, by, WARN_COLOR);
       } else {
-        // Checkmark — plugged in, fully charged
-        gfx->drawLine(bx, by + 10, bx + 4, by + 14, GOOD_COLOR);
-        gfx->drawLine(bx + 4, by + 14, bx + 10, by + 4, GOOD_COLOR);
-        gfx->drawLine(bx, by + 11, bx + 4, by + 15, GOOD_COLOR);
-        gfx->drawLine(bx + 4, by + 15, bx + 10, by + 5, GOOD_COLOR);
+        drawCheckmark(bx, by, GOOD_COLOR);
       }
     }
   } else {

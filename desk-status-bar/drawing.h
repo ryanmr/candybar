@@ -131,6 +131,19 @@ void drawWifiSignalBars(int x, int y, int rssi) {
   }
 }
 
+// ── Small Icon Helpers ─────────────────────────────────────
+void drawLightningBolt(int x, int y, uint16_t color) {
+  gfx->fillTriangle(x + 4, y, x + 10, y, x + 2, y + 9, color);
+  gfx->fillTriangle(x + 1, y + 7, x + 7, y + 7, x - 1, y + 16, color);
+}
+
+void drawCheckmark(int x, int y, uint16_t color) {
+  gfx->drawLine(x, y + 10, x + 4, y + 14, color);
+  gfx->drawLine(x + 4, y + 14, x + 10, y + 4, color);
+  gfx->drawLine(x, y + 11, x + 4, y + 15, color);
+  gfx->drawLine(x + 4, y + 15, x + 10, y + 5, color);
+}
+
 // =============================================================
 // Sun Arc — visual sunrise/sunset timeline
 // =============================================================
@@ -157,9 +170,9 @@ void drawSunArc(int panelX, int arcCY) {
     unsigned long nightStart, nightEnd;
     if (localNow >= set) {
       nightStart = set;
-      nightEnd = rise + 86400; // next sunrise
+      nightEnd = rise + SECS_PER_DAY; // next sunrise
     } else {
-      nightStart = set - 86400; // previous sunset
+      nightStart = set - SECS_PER_DAY; // previous sunset
       nightEnd = rise;
     }
     progress = (float)(localNow - nightStart) / (float)(nightEnd - nightStart);
@@ -198,10 +211,10 @@ void drawSunArc(int panelX, int arcCY) {
   gfx->fillCircle(dotX, dotY, 3, dotColor);
 
   // Time labels at endpoints
-  int riseH = (rise % 86400) / 3600;
-  int riseM = ((rise % 86400) % 3600) / 60;
-  int setH  = (set % 86400) / 3600;
-  int setM  = ((set % 86400) % 3600) / 60;
+  int riseH = (rise % SECS_PER_DAY) / 3600;
+  int riseM = ((rise % SECS_PER_DAY) % 3600) / 60;
+  int setH  = (set % SECS_PER_DAY) / 3600;
+  int setM  = ((set % SECS_PER_DAY) % 3600) / 60;
 
   // Convert to 12h
   int rH = formatHour12(riseH);
