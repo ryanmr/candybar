@@ -182,12 +182,19 @@ void drawDateTile0(int px, int py, int pw, int ph, struct tm* t) {
   int daysLeft = (leap ? 366 : 365) - doy;
   int week = (t->tm_yday + 7 - ((t->tm_wday + 6) % 7)) / 7;  // ISO week approx
 
-  char doyBuf[24];
-  snprintf(doyBuf, sizeof(doyBuf), "W%d  Day %d (-%d)", week, doy, daysLeft);
+  int weeksLeft = daysLeft / 7;
+
+  char line1[20];
+  snprintf(line1, sizeof(line1), "Day %d [-%d]", doy, daysLeft);
   gfx->setTextColor(TEXT_DIM);
   gfx->setTextSize(1);
   gfx->setCursor(px + 12, py + 88);
-  gfx->print(doyBuf);
+  gfx->print(line1);
+
+  char line2[20];
+  snprintf(line2, sizeof(line2), "Week %d [-%d]", week, weeksLeft);
+  gfx->setCursor(px + 12, py + 100);
+  gfx->print(line2);
 }
 
 // ── DATE tile 1: Sun Arc ────────────────────────────────────
