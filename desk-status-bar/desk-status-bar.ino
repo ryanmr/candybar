@@ -99,7 +99,6 @@ bool rtcReady = false;
 SensorQMI8658 qmi;
 bool qmiReady = false;
 float lastAccX = 0.0f, lastAccY = 0.0f, lastAccZ = 0.0f;
-bool  accelFresh = false;
 #if CRITTER_ENABLED
 float accelBaseX = 0.0f;       // resting tilt offset (calibrated at boot)
 #endif
@@ -108,7 +107,6 @@ float accelBaseX = 0.0f;       // resting tilt offset (calibrated at boot)
 unsigned long lastMotionTime = 0;
 float prevAccX = 0.0f, prevAccY = 0.0f, prevAccZ = 0.0f;
 bool  backlightDimmed = false;
-uint8_t currentBrightness = BRIGHTNESS;
 
 // -- Critter pet state --
 CritterState critterState = CRIT_IDLE;
@@ -163,13 +161,7 @@ void setup() {
   latchPowerOn();
   sampleBatteryOnce(); // Initial battery read at boot
   updatePowerState();  // Detect USB vs battery power
-
-  // Init RTC (PCF85063 — provides time before WiFi/NTP is available)
-  rtcReady = rtc.begin(Wire1, I2C_SDA, I2C_SCL);
-  if (rtcReady && rtc.isClockIntegrityGuaranteed()) {
-    // Set ESP32 system clock from RTC so time is available immediately
-    rtc.hwClockRead();
-  }
+  initChargerStatPin(); // Configure TCA9554 P5 as input (once)
 
   // Init IMU (QMI8658 — used for auto-dim motion detection + critter tilt)
   qmiReady = qmi.begin(Wire1, QMI8658_ADDR, I2C_SDA, I2C_SCL);
@@ -186,8 +178,11 @@ void setup() {
   Serial.println("  Desk Status Bar — Booting");
   Serial.println("=============================\n");
 
+  // Init RTC (PCF85063 — provides time before WiFi/NTP is available)
+  rtcReady = rtc.begin(Wire1, I2C_SDA, I2C_SCL);
   if (rtcReady) {
     if (rtc.isClockIntegrityGuaranteed()) {
+      rtc.hwClockRead();  // Set system clock from RTC immediately
       RTC_DateTime now = rtc.getDateTime();
       Serial.printf("[RTC] PCF85063 ready — %04d-%02d-%02d %02d:%02d:%02d\n",
         now.getYear(), now.getMonth(), now.getDay(),
@@ -326,7 +321,7 @@ void loop() {
   }
 
   // Refresh battery voltage + power state periodically
-  if (now - lastBatteryRead >= 60000) {
+  if (now - lastBatteryRead >= BATTERY_INTERVAL) {
     sampleBatteryOnce();
     updatePowerState();
     lastBatteryRead = now;
@@ -355,7 +350,7 @@ void loop() {
       lastMotionTime = now;
     } else if (!pwrDown) {
       pwrBtnWasDown = false;
-    } else if (pwrDown && pwrBtnWasDown && (now - pwrBtnDownAt >= 3000)) {
+    } else if (pwrDown && pwrBtnWasDown && (now - pwrBtnDownAt >= POWER_OFF_HOLD_MS)) {
       powerOff();
     }
   }

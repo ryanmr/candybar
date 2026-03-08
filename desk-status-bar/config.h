@@ -61,6 +61,12 @@
 #ifndef DIM_BRIGHTNESS
 #define DIM_BRIGHTNESS   100      // 100–150 works; below ~100 the backlight goes fully black
 #endif
+#ifndef MOTION_THRESHOLD
+#define MOTION_THRESHOLD 0.15f    // accelerometer delta to detect motion (g)
+#endif
+#ifndef POWER_OFF_HOLD_MS
+#define POWER_OFF_HOLD_MS 3000    // hold power button this long to shut down
+#endif
 
 // -- Update Intervals (milliseconds) --
 #ifndef WEATHER_INTERVAL
@@ -68,6 +74,9 @@
 #endif
 #ifndef CLOCK_INTERVAL
 #define CLOCK_INTERVAL    (1000)             // 1 second
+#endif
+#ifndef BATTERY_INTERVAL
+#define BATTERY_INTERVAL  (60 * 1000)        // 60 seconds
 #endif
 #ifndef TOUCH_DEBOUNCE
 #define TOUCH_DEBOUNCE    (300)              // touch debounce ms

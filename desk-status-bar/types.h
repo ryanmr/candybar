@@ -4,6 +4,8 @@
 // Types, structs, enums, and layout constants
 // =============================================================
 
+#define SECS_PER_DAY 86400UL
+
 struct WeatherData {
   float temp;
   float feels_like;

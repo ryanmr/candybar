@@ -4,7 +4,6 @@
 // IMU Reading — shared between critter and auto-dim
 // =============================================================
 void readIMU() {
-  accelFresh = false;
   if (!qmiReady) return;
   if (qmi.getDataReady()) {
     IMUdata acc, gyro;
@@ -12,8 +11,7 @@ void readIMU() {
       lastAccX = acc.x;
       lastAccY = acc.y;
       lastAccZ = acc.z;
-      accelFresh = true;
     }
-    qmi.getGyroscope(gyro.x, gyro.y, gyro.z); // must read both
+    qmi.getGyroscope(gyro.x, gyro.y, gyro.z); // must read both to advance FIFO
   }
 }
